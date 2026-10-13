@@ -1,0 +1,46 @@
+# ==========================================
+# NutNotes Git Ignore Configuration
+# ==========================================
+
+# Сборки и релизные артефакты
+build/
+release/
+Setup/Output/
+dist/
+
+examples/
+*.zip
+*.tar.gz
+*.exe
+*.dll
+
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.coverage
+
+audit_*.py
+check_*.py
+analyze_*.py
+search_doc.py
+test_*.py
+names_analysis.txt
+Setup/temp.txt
+
+# Локальные тяжелые файлы документации и временные логи
+reaper_imgui_doc.html
+names_analysis.txt
+
+# Файлы REAPER
+*.rpp-bak
+*.RPP-UNDO
+*.reapeaks
+
+# Редакторы и ОС
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

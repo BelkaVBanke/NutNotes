@@ -1,0 +1,19 @@
+[Script Info]
+Title: Sample Dubbing Subtitles
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.50,0:00:04.20,Default,Алексей,0,0,0,,{\b1}Всем привет!{\b0} Сегодня мы начинаем новый проект.
+Dialogue: 0,0:00:04.50,0:00:07.80,Default,Мария,0,0,0,,Отличная новость!\NЯ уже приготовила сценарий для озвучки.
+Dialogue: 0,0:00:08.00,0:00:10.50,Default,Дмитрий,0,0,0,,{\i1}Звучит многообещающе.{\i1} Когда дедлайн?
+Dialogue: 0,0:00:11.00,0:00:13.20,Default,,0,0,0,,(за кадром слышен шум улицы и шаги)
+Dialogue: 0,0:00:14.00,0:00:17.00,Default,Алексей,0,0,0,,Дедлайн через неделю, так что поторопимся!
+Dialogue: 0,0:00:17.50,0:00:20.00,Default,Елена,0,0,0,,Я проверю тайминги в Reaper.
