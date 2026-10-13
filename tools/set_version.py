@@ -19,7 +19,8 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT_DIR / "VERSION"
 NUTNOTES_LUA = ROOT_DIR / "NutNotes.lua"
 STATE_LUA = ROOT_DIR / "modules" / "state.lua"
-INSTALLER_ISS = ROOT_DIR / "Setup" / "NutNotes_Installer.iss"
+INSTALLER_ISS = ROOT_DIR / "installer" / "NutNotes_Installer.iss"
+README_MD = ROOT_DIR / "README.md"
 
 def get_current_version() -> str:
     if VERSION_FILE.exists():
@@ -59,12 +60,19 @@ def sync_all(new_version: str):
         STATE_LUA.write_text(updated, encoding="utf-8")
         print(f"  + Updated modules/state.lua (version)")
 
-    # 4. Update Setup/NutNotes_Installer.iss (#define MyAppVersion "...")
+    # 4. Update installer/NutNotes_Installer.iss (#define MyAppVersion "...")
     if INSTALLER_ISS.exists():
         content = INSTALLER_ISS.read_text(encoding="utf-8-sig")
         updated = re.sub(r'#define\s+MyAppVersion\s+"[^"]+"', f'#define MyAppVersion "{new_version}"', content)
         INSTALLER_ISS.write_text(updated, encoding="utf-8-sig")
-        print(f"  + Updated Setup/NutNotes_Installer.iss (#define MyAppVersion)")
+        print(f"  + Updated installer/NutNotes_Installer.iss (#define MyAppVersion)")
+
+    # 5. Update README.md (> **Версия:** `...`)
+    if README_MD.exists():
+        content = README_MD.read_text(encoding="utf-8")
+        updated = re.sub(r"(>\s*\*\*(?:Версия|Version):\*\*\s*`)[^`]+(`)", rf"\g<1>{new_version}\g<2>", content)
+        README_MD.write_text(updated, encoding="utf-8")
+        print(f"  + Updated {README_MD.name} (Версия)")
 
     print(f"[OK] All project files successfully synchronized to version {new_version}!\n")
 

@@ -6,7 +6,7 @@ Automates:
   1. Icon and asset generation (toolbar icons, .ico)
   2. Downloading official x64 dependencies (ReaImGui, ReaPack)
   3. Locating or bootstrapping Inno Setup (ISCC.exe)
-  4. Compiling the self-contained installer: Setup/Output/NutNotes_Setup_vX.X.X.exe
+  4. Compiling the self-contained installer: installer/Output/NutNotes_Setup_vX.X.X.exe
 """
 
 import os
@@ -17,12 +17,12 @@ import subprocess
 import urllib.request
 import json
 
-SETUP_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(SETUP_DIR)
-ASSETS_DIR = os.path.join(SETUP_DIR, "assets")
-DEPS_DIR = os.path.join(SETUP_DIR, "dependencies")
-OUTPUT_DIR = os.path.join(SETUP_DIR, "Output")
-ISS_FILE = os.path.join(SETUP_DIR, "NutNotes_Installer.iss")
+INSTALLER_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(INSTALLER_DIR)
+ASSETS_DIR = os.path.join(INSTALLER_DIR, "assets")
+DEPS_DIR = os.path.join(INSTALLER_DIR, "dependencies")
+OUTPUT_DIR = os.path.join(INSTALLER_DIR, "Output")
+ISS_FILE = os.path.join(INSTALLER_DIR, "NutNotes_Installer.iss")
 
 # Tested dependencies versions
 DEPS = [
@@ -65,7 +65,7 @@ def download_file(url, target_path, desc):
     log(f"Saved {os.path.basename(target_path)} ({size_mb:.2f} MB)")
 
 def ensure_dependencies():
-    """Ensure all required DLLs are present in Setup/dependencies/"""
+    """Ensure all required DLLs are present in installer/dependencies/"""
     os.makedirs(DEPS_DIR, exist_ok=True)
     for dep in DEPS:
         dst = os.path.join(DEPS_DIR, dep["filename"])

@@ -341,7 +341,7 @@ function actions.ensure_toolbar_icons()
     res_path .. "/Scripts/MyScripts/assets",
     res_path .. "/Scripts/assets",
     "assets",
-    "Setup/assets"
+    "installer/assets"
   }
 
   for _, cdir in ipairs(candidate_dirs) do

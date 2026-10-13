@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Update all project and installer images based on the user's hand-crafted Setup/assets/app_icon.png.
+Update all project and installer images based on the user's hand-crafted installer/assets/app_icon.png.
 Updates:
   - assets/acorn.png (512x512)
   - assets/acorn_colored.png (512x512)
   - assets/nutnotes_toolbar.png (90x30 3-state)
   - assets/nutnotes_icon_30.png (30x30)
-  - Setup/assets/app_icon.ico (Windows multi-res: 256, 128, 64, 48, 32, 16)
-  - Setup/assets/wizard_small.bmp (55x55 24-bit BMP)
-  - Setup/assets/wizard_large.bmp (164x314 24-bit BMP)
-  - Setup/assets/nutnotes_toolbar.png (90x30 3-state)
-  - Setup/assets/nutnotes_icon_30.png (30x30)
+  - installer/assets/app_icon.ico (Windows multi-res: 256, 128, 64, 48, 32, 16)
+  - installer/assets/wizard_small.bmp (55x55 24-bit BMP)
+  - installer/assets/wizard_large.bmp (164x314 24-bit BMP)
+  - installer/assets/nutnotes_toolbar.png (90x30 3-state)
+  - installer/assets/nutnotes_icon_30.png (30x30)
   - build/ and release/ assets mirrors
 """
 
@@ -20,7 +20,7 @@ import shutil
 from PIL import Image, ImageDraw, ImageFont
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC_APP_ICON = os.path.join(PROJECT_DIR, "Setup", "assets", "app_icon.png")
+SRC_APP_ICON = os.path.join(PROJECT_DIR, "installer", "assets", "app_icon.png")
 
 def main():
     if not os.path.exists(SRC_APP_ICON):
@@ -39,7 +39,7 @@ def main():
     print(f"Updated: {p_acorn_col} (512x512 colored)")
 
     # 2. In-App Contour Acorn (for watermark in main window & overlay)
-    contour_src = os.path.join(PROJECT_DIR, "Setup", "assets", "acorn.png")
+    contour_src = os.path.join(PROJECT_DIR, "installer", "assets", "acorn.png")
     if not os.path.exists(contour_src):
         contour_src = os.path.join(PROJECT_DIR, "examples", "acorn_3364582.png")
     c_img = Image.open(contour_src).convert("RGBA")
@@ -52,11 +52,11 @@ def main():
     ))
     p_acorn = os.path.join(PROJECT_DIR, "assets", "acorn.png")
     white_contour.save(p_acorn, "PNG")
-    white_contour.save(os.path.join(PROJECT_DIR, "Setup", "assets", "acorn.png"), "PNG")
+    white_contour.save(os.path.join(PROJECT_DIR, "installer", "assets", "acorn.png"), "PNG")
     print(f"Updated: {p_acorn} (512x512 contour outline for watermark)")
 
-    # 3. Setup/assets/app_icon.ico (multi-resolution Windows icon) - COLORED for installer
-    ico_dest = os.path.join(PROJECT_DIR, "Setup", "assets", "app_icon.ico")
+    # 3. installer/assets/app_icon.ico (multi-resolution Windows icon) - COLORED for installer
+    ico_dest = os.path.join(PROJECT_DIR, "installer", "assets", "app_icon.ico")
     ico_sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
     ico_imgs = [user_icon.resize(s, Image.Resampling.LANCZOS) for s in ico_sizes]
     ico_imgs[0].save(
@@ -67,15 +67,15 @@ def main():
     )
     print(f"Updated: {ico_dest} (multi-res ICO 16..256 colored)")
 
-    # 4. Setup/assets/wizard_small.bmp (55x55 24-bit BMP) - COLORED for installer header
+    # 4. installer/assets/wizard_small.bmp (55x55 24-bit BMP) - COLORED for installer header
     small_bmp = Image.new("RGB", (55, 55), color=(255, 255, 255))
     icon_45 = user_icon.resize((45, 45), Image.Resampling.LANCZOS)
     small_bmp.paste(icon_45, (5, 5), mask=icon_45.split()[3])
-    small_dest = os.path.join(PROJECT_DIR, "Setup", "assets", "wizard_small.bmp")
+    small_dest = os.path.join(PROJECT_DIR, "installer", "assets", "wizard_small.bmp")
     small_bmp.save(small_dest, "BMP")
     print(f"Updated: {small_dest} (55x55 BMP colored)")
 
-    # 5. Setup/assets/wizard_large.bmp (164x314 24-bit BMP) - COLORED for installer banner
+    # 5. installer/assets/wizard_large.bmp (164x314 24-bit BMP) - COLORED for installer banner
     banner_w, banner_h = 164, 314
     banner = Image.new("RGB", (banner_w, banner_h), color=(255, 255, 255))
     draw_b = ImageDraw.Draw(banner)
@@ -115,7 +115,7 @@ def main():
     sw = bbox_s[2] - bbox_s[0]
     draw_b.text(((banner_w - sw) // 2, by + 150), sub_text, fill=(110, 90, 80), font=font_sub)
 
-    large_dest = os.path.join(PROJECT_DIR, "Setup", "assets", "wizard_large.bmp")
+    large_dest = os.path.join(PROJECT_DIR, "installer", "assets", "wizard_large.bmp")
     banner.save(large_dest, "BMP")
     print(f"Updated: {large_dest} (164x314 BMP colored)")
 
@@ -147,7 +147,7 @@ def main():
     tb_90.paste(icon_hover, (33, 3), icon_hover)
     tb_90.paste(icon_pressed, (64, 4), icon_pressed)
 
-    for folder in [os.path.join(PROJECT_DIR, "Setup", "assets"), os.path.join(PROJECT_DIR, "assets")]:
+    for folder in [os.path.join(PROJECT_DIR, "installer", "assets"), os.path.join(PROJECT_DIR, "assets")]:
         dst = os.path.join(folder, "nutnotes_toolbar.png")
         tb_90.save(dst, "PNG")
         print(f"Updated: {dst} (90x30 contour 3-state)")

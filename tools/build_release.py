@@ -73,7 +73,7 @@ def main():
     nutnotes_dir.mkdir(parents=True, exist_ok=True)
 
     # 2. Copy UserPlugins dependencies (DLLs)
-    deps_dir = root_dir / "Setup" / "dependencies"
+    deps_dir = root_dir / "installer" / "dependencies"
     dll_files = ["reaper_imgui-x64.dll", "reaper_reapack-x64.dll"]
     for dll in dll_files:
         src = deps_dir / dll

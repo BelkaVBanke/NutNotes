@@ -1,7 +1,7 @@
 # 🌰 NutNotes (ASS & SRT Subtitles for REAPER)
 
 > **Инструмент для дубляжа, озвучки. Plugin для визуализации субтитров в Cockos REAPER.** 
-> **Версия:** `0.3 BETA`  
+> **Версия:** `0.3.0-beta`  
 > **Автор:** BelkaVBanke  
 > **Репозиторий:** [GitHub](https://github.com/BelkaVBanke/NutNotes)
 
@@ -61,8 +61,8 @@ NutNotes предлагает актерам озвучивания: списо�
 <a id="setup-reaper"></a>
 ### 1.3. Подключение скрипта в REAPER вручную
 1. Скачайте архив NutNotes_vX.X_BETA.zip из Release:
-   - Распакуйте папку `NutNotes` в каталог пользовательских скриптов REAPER:
-     > Путь можно быстро открыть из REAPER: **Options -> Show REAPER resource path in explorer/finder...** -> папка `Scripts/`.
+   - Распакуйте папку `NutNotes` в (%appdata%\Roaming\REAPER), либо каталог REAPER (если у вас portable версия):
+     > Путь можно быстро открыть из REAPER: **Options -> Show REAPER resource path in explorer/finder...** -> папка `Scripts/` -> Подняться вверх по директориям.
 2. В REAPER откройте окно действий: **Actions -> Show action list...**.
 3. В правом нижнем углу нажмите **New action... -> Load ReaScript...**
 4. Выберите файл `NutNotes.lua`.

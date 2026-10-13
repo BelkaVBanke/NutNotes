@@ -10,10 +10,10 @@ Generate Colored NutNotes Logo & Installer Artwork
 - Generates:
   - assets/acorn.png (512x512 RGBA)
   - assets/acorn_colored.png (512x512 RGBA)
-  - Setup/assets/app_icon.ico (Windows multi-resolution icon)
-  - Setup/assets/wizard_small.bmp (55x55 24-bit BMP for Inno Setup header)
-  - Setup/assets/wizard_large.bmp (164x314 24-bit BMP for Inno Setup welcome/finish page)
-  - Setup/assets/nutnotes_toolbar.png (REAPER toolbar button icon)
+  - installer/assets/app_icon.ico (Windows multi-resolution icon)
+  - installer/assets/wizard_small.bmp (55x55 24-bit BMP for Inno Setup header)
+  - installer/assets/wizard_large.bmp (164x314 24-bit BMP for Inno Setup welcome/finish page)
+  - installer/assets/nutnotes_toolbar.png (REAPER toolbar button icon)
 """
 
 import os
@@ -160,7 +160,7 @@ def main():
         logo = generate_colored_acorn()
 
     os.makedirs('assets', exist_ok=True)
-    os.makedirs('Setup/assets', exist_ok=True)
+    os.makedirs('installer/assets', exist_ok=True)
 
     # 1. Colored artwork for Installer & branding
     logo_512 = logo.resize((512, 512), Image.Resampling.LANCZOS)
@@ -168,7 +168,7 @@ def main():
     print("Saved assets/acorn_colored.png (512x512 colored)")
 
     # 2. In-App Contour Acorn (for watermark in main window & overlay)
-    contour_src = 'Setup/assets/acorn.png'
+    contour_src = 'installer/assets/acorn.png'
     if not os.path.exists(contour_src):
         contour_src = 'examples/acorn_3364582.png'
     c_img = Image.open(contour_src).convert('RGBA')
@@ -181,7 +181,7 @@ def main():
         alpha_c
     ))
     white_contour.save('assets/acorn.png', 'PNG')
-    white_contour.save('Setup/assets/acorn.png', 'PNG')
+    white_contour.save('installer/assets/acorn.png', 'PNG')
     print("Saved assets/acorn.png (512x512 contour outline for watermark)")
 
     # 3. Save Windows multi-resolution icon (.ico) - COLORED for installer
@@ -190,19 +190,19 @@ def main():
     for s in ico_sizes:
         ico_imgs.append(logo.resize(s, Image.Resampling.LANCZOS))
     ico_imgs[0].save(
-        'Setup/assets/app_icon.ico',
+        'installer/assets/app_icon.ico',
         format='ICO',
         sizes=[(im.width, im.height) for im in ico_imgs],
         append_images=ico_imgs[1:]
     )
-    print("Saved Setup/assets/app_icon.ico (colored)")
+    print("Saved installer/assets/app_icon.ico (colored)")
 
     # 4. Save WizardSmallImageFile (55x55 24-bit BMP) - COLORED for installer header
     small_bmp = Image.new('RGB', (55, 55), color=(255, 255, 255))
     logo_small = logo.resize((45, 45), Image.Resampling.LANCZOS)
     small_bmp.paste(logo_small, (5, 5), mask=logo_small.split()[3])
-    small_bmp.save('Setup/assets/wizard_small.bmp', 'BMP')
-    print("Saved Setup/assets/wizard_small.bmp (55x55 colored)")
+    small_bmp.save('installer/assets/wizard_small.bmp', 'BMP')
+    print("Saved installer/assets/wizard_small.bmp (55x55 colored)")
 
     # 5. Save WizardImageFile (164x314 24-bit BMP) - COLORED for installer banner
     banner_w, banner_h = 164, 314
@@ -246,8 +246,8 @@ def main():
     sw = bbox_s[2] - bbox_s[0]
     draw_b.text(((banner_w - sw) // 2, by + 150), sub_text, fill=(110, 90, 80), font=font_sub)
 
-    banner.save('Setup/assets/wizard_large.bmp', 'BMP')
-    print("Saved Setup/assets/wizard_large.bmp (164x314 colored)")
+    banner.save('installer/assets/wizard_large.bmp', 'BMP')
+    print("Saved installer/assets/wizard_large.bmp (164x314 colored)")
 
     # 6. Save Toolbar Icons - CONTOUR for REAPER toolbar
     # Multi-resolution outline icon:
@@ -279,16 +279,16 @@ def main():
     tb_90.paste(icon_hover, (33, 3), icon_hover)
     tb_90.paste(icon_pressed, (64, 4), icon_pressed)
 
-    for p in ['assets/nutnotes_toolbar.png', 'Setup/assets/nutnotes_toolbar.png']:
+    for p in ['assets/nutnotes_toolbar.png', 'installer/assets/nutnotes_toolbar.png']:
         tb_90.save(p, 'PNG')
-    print("Saved assets/nutnotes_toolbar.png and Setup/assets/nutnotes_toolbar.png (90x30 contour 3-state)")
+    print("Saved assets/nutnotes_toolbar.png and installer/assets/nutnotes_toolbar.png (90x30 contour 3-state)")
 
     # Single 30x30 icon
     single_30 = Image.new("RGBA", (30, 30), (0, 0, 0, 0))
     single_30.paste(icon_normal, (3, 3), icon_normal)
-    for p in ['assets/nutnotes_icon_30.png', 'Setup/assets/nutnotes_icon_30.png']:
+    for p in ['assets/nutnotes_icon_30.png', 'installer/assets/nutnotes_icon_30.png']:
         single_30.save(p, 'PNG')
-    print("Saved assets/nutnotes_icon_30.png and Setup/assets/nutnotes_icon_30.png (30x30 contour single)")
+    print("Saved assets/nutnotes_icon_30.png and installer/assets/nutnotes_icon_30.png (30x30 contour single)")
 
     print("\nAll assets generated successfully!")
 
