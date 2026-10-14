@@ -1267,7 +1267,7 @@ function ui.render_tab_subtitles(ctx, state, ImGui)
     ImGui.PopStyleColor(ctx, 3)
 
     if ImGui.IsItemHovered(ctx) then
-      set_tooltip(ctx, state, ImGui, "Создает/наполняет трек 'subtitle' айтемами с именем актера и заметками текста")
+      set_tooltip(ctx, state, ImGui, "Создает/наполняет трек 'sub-items-track' айтемами с именем актера и заметками текста")
     end
 
     ImGui.SameLine(ctx, 0, 8)
@@ -1282,7 +1282,7 @@ function ui.render_tab_subtitles(ctx, state, ImGui)
     ImGui.PopStyleColor(ctx, 3)
 
     if ImGui.IsItemHovered(ctx) then
-      set_tooltip(ctx, state, ImGui, "Удаляет все айтемы с трека 'subtitle'")
+      set_tooltip(ctx, state, ImGui, "Удаляет все айтемы с трека 'sub-items-track'")
     end
 
     ImGui.PopStyleVar(ctx, 2)

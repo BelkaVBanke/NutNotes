@@ -9,22 +9,55 @@
 local parser = require('parser')
 local actions = {}
 
--- Find existing track named "subtitle"
+actions.SUBTITLE_TRACK_NAME = "sub-items-track"
+
+-- Invisible UTF-8 signature: Zero-Width Space (U+200B) + Zero-Width Non-Joiner (U+200C)
+local REGION_SIGNATURE = "\xE2\x80\x8B\xE2\x80\x8C"
+
+-- Tag a region display name with NutNotes invisible signature and subtitle index
+function actions.tag_region_name(display_name, idx)
+  return REGION_SIGNATURE .. tostring(idx or 0) .. ":" .. (display_name or "")
+end
+
+-- Check if a region name was created by NutNotes
+function actions.is_plugin_region(name)
+  if not name or type(name) ~= "string" then return false end
+  return name:sub(1, #REGION_SIGNATURE) == REGION_SIGNATURE
+end
+
+-- Parse subtitle index and original display name from a tagged region name
+function actions.parse_plugin_region(name)
+  if not actions.is_plugin_region(name) then return nil, name end
+  local payload = name:sub(#REGION_SIGNATURE + 1)
+  local idx_str, original_name = payload:match("^(%d+):(.*)$")
+  if idx_str then
+    return tonumber(idx_str), original_name
+  end
+  return nil, payload
+end
+
+-- Find existing track named "sub-items-track" (with fallback to legacy "subtitle")
 function actions.find_subtitle_track()
   if not reaper or not reaper.CountTracks or not reaper.GetTrack or not reaper.GetSetMediaTrackInfo_String then return nil end
 
   local num_tracks = reaper.CountTracks(0)
+  local fallback_tr = nil
   for i = 0, num_tracks - 1 do
     local tr = reaper.GetTrack(0, i)
     local _, name = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
-    if name and name:lower() == "subtitle" then
-      return tr
+    if name then
+      local lower_name = name:lower()
+      if lower_name == actions.SUBTITLE_TRACK_NAME:lower() then
+        return tr
+      elseif lower_name == "subtitle" and not fallback_tr then
+        fallback_tr = tr
+      end
     end
   end
-  return nil
+  return fallback_tr
 end
 
--- Find or create track named "subtitle"
+-- Find or create track named "sub-items-track"
 function actions.get_or_create_subtitle_track()
   local existing = actions.find_subtitle_track()
   if existing then return existing end
@@ -33,7 +66,7 @@ function actions.get_or_create_subtitle_track()
   local num_tracks = reaper.CountTracks(0)
   reaper.InsertTrackAtIndex(num_tracks, true)
   local new_tr = reaper.GetTrack(0, num_tracks)
-  reaper.GetSetMediaTrackInfo_String(new_tr, "P_NAME", "subtitle", true)
+  reaper.GetSetMediaTrackInfo_String(new_tr, "P_NAME", actions.SUBTITLE_TRACK_NAME, true)
   return new_tr
 end
 
@@ -135,7 +168,7 @@ function actions.create_items(subtitles, palette, state)
   return count_created
 end
 
--- Clear all existing project regions
+-- Clear only plugin-created project regions (leaves user markers/regions intact)
 function actions.clear_regions()
   if not reaper or not reaper.CountProjectMarkers or not reaper.EnumProjectMarkers3 or not reaper.DeleteProjectMarker then return 0 end
 
@@ -144,7 +177,7 @@ function actions.clear_regions()
 
   for i = (num_markers + num_regions) - 1, 0, -1 do
     local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, i)
-    if retval > 0 and isrgn then
+    if retval > 0 and isrgn and actions.is_plugin_region(name) then
       reaper.DeleteProjectMarker(0, markrgnidx, true)
       count_deleted = count_deleted + 1
     end
@@ -153,7 +186,7 @@ function actions.clear_regions()
   return count_deleted
 end
 
--- Clear all regions with dedicated Undo point
+-- Clear all plugin regions with dedicated Undo point
 function actions.clear_regions_with_undo()
   if not reaper then return 0 end
 
@@ -162,25 +195,25 @@ function actions.clear_regions_with_undo()
   local count = actions.clear_regions()
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
   if reaper.UpdateTimeline then reaper.UpdateTimeline() end
-  if reaper.Undo_EndBlock then reaper.Undo_EndBlock("Clear All Regions (" .. count .. ")", -1) end
+  if reaper.Undo_EndBlock then reaper.Undo_EndBlock("Clear Subtitle Regions (" .. count .. ")", -1) end
   return count
 end
 
--- Set regions: deletes existing regions and loads subtitles into project regions
+-- Set regions: deletes existing plugin regions and loads subtitles into project regions
 function actions.set_regions(subtitles, palette, state)
   if not reaper or not subtitles or not reaper.AddProjectMarker2 then return 0 end
 
   if reaper.Undo_BeginBlock then reaper.Undo_BeginBlock() end
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(1) end
 
-  -- Delete all current regions
+  -- Delete only NutNotes plugin regions (user markers and regions stay untouched)
   actions.clear_regions()
 
   palette = palette or {}
   local count_created = 0
 
   for i, sub in ipairs(subtitles) do
-    local name = ""
+    local display_name = ""
     local color = 0
 
     local single_line_text = parser.strip_invisible_unicode(sub.text:gsub("\r\n", " "):gsub("\n", " "))
@@ -188,17 +221,18 @@ function actions.set_regions(subtitles, palette, state)
 
     if primary_actor ~= "NoActor" then
       local actor_label = sub.raw_actor or sub.actor
-      name = "[" .. actor_label .. "] " .. single_line_text
+      display_name = "[" .. actor_label .. "] " .. single_line_text
       if palette[primary_actor] then
         color = palette[primary_actor].reaper_color or 0
       end
     else
-      name = single_line_text
+      display_name = single_line_text
       color = 0 -- Default REAPER color for NoActor
     end
 
     local real_idx = (state and state.find_subtitle_index and state.find_subtitle_index(sub)) or i
-    reaper.AddProjectMarker2(0, true, sub.start_time, sub.end_time, name, real_idx, color)
+    local tagged_name = actions.tag_region_name(display_name, real_idx)
+    reaper.AddProjectMarker2(0, true, sub.start_time, sub.end_time, tagged_name, real_idx, color)
     count_created = count_created + 1
   end
 
@@ -756,24 +790,16 @@ function actions.init_timeline_sync(state)
     end
   end
 
-  -- Map regions
+  -- Map regions (only NutNotes plugin regions)
   local regions_map = {}
   local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
   for m = 0, num_markers + num_regions - 1 do
     local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, m)
-    if retval > 0 and isrgn then
-      if markrgnidx >= 1 and markrgnidx <= #state.subtitles then
-        regions_map[markrgnidx] = { markrgnidx = markrgnidx, pos = pos, rgnend = rgnend, name = name, color = color }
-      end
-    end
-  end
-  if num_regions == #state.subtitles and next(regions_map) == nil then
-    local r_idx = 1
-    for m = 0, num_markers + num_regions - 1 do
-      local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, m)
-      if retval > 0 and isrgn and r_idx <= #state.subtitles then
-        regions_map[r_idx] = { markrgnidx = markrgnidx, pos = pos, rgnend = rgnend, name = name, color = color }
-        r_idx = r_idx + 1
+    if retval > 0 and isrgn and actions.is_plugin_region(name) then
+      local parsed_idx = actions.parse_plugin_region(name)
+      local target_idx = parsed_idx or markrgnidx
+      if target_idx >= 1 and target_idx <= #state.subtitles then
+        regions_map[target_idx] = { markrgnidx = markrgnidx, pos = pos, rgnend = rgnend, name = name, color = color }
       end
     end
   end
@@ -976,28 +1002,32 @@ function actions.update_subtitle_timeline(state, idx)
     if reaper.UpdateArrange then reaper.UpdateArrange() end
   end
 
-  -- 2. Update project region
+  -- 2. Update project region (only NutNotes plugin region)
   local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
   for m = 0, num_markers + num_regions - 1 do
     local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, m)
-    if retval > 0 and isrgn and markrgnidx == idx then
-      local single_line_text = parser.strip_invisible_unicode(sub.text:gsub("\r\n", " "):gsub("\n", " "))
-      local primary_actor = (sub.actors and sub.actors[1]) or sub.actor
-      local rgn_name = ""
-      local rgn_color = 0
-      if primary_actor ~= "NoActor" then
-        local actor_label = sub.raw_actor or sub.actor
-        rgn_name = "[" .. actor_label .. "] " .. single_line_text
-        if state.actor_palette and state.actor_palette[primary_actor] then
-          rgn_color = state.actor_palette[primary_actor].reaper_color or 0
+    if retval > 0 and isrgn and actions.is_plugin_region(name) then
+      local parsed_idx = actions.parse_plugin_region(name)
+      if markrgnidx == idx or parsed_idx == idx then
+        local single_line_text = parser.strip_invisible_unicode(sub.text:gsub("\r\n", " "):gsub("\n", " "))
+        local primary_actor = (sub.actors and sub.actors[1]) or sub.actor
+        local display_name = ""
+        local rgn_color = 0
+        if primary_actor ~= "NoActor" then
+          local actor_label = sub.raw_actor or sub.actor
+          display_name = "[" .. actor_label .. "] " .. single_line_text
+          if state.actor_palette and state.actor_palette[primary_actor] then
+            rgn_color = state.actor_palette[primary_actor].reaper_color or 0
+          end
+        else
+          display_name = single_line_text
+          rgn_color = 0
         end
-      else
-        rgn_name = single_line_text
-        rgn_color = 0
+        local tagged_name = actions.tag_region_name(display_name, idx)
+        reaper.SetProjectMarker3(0, markrgnidx, true, pos, rgnend, tagged_name, rgn_color)
+        if reaper.UpdateTimeline then reaper.UpdateTimeline() end
+        break
       end
-      reaper.SetProjectMarker3(0, markrgnidx, true, pos, rgnend, rgn_name, rgn_color)
-      if reaper.UpdateTimeline then reaper.UpdateTimeline() end
-      break
     end
   end
 end
@@ -1028,13 +1058,17 @@ function actions.update_all_timeline_actors(state)
     if reaper.UpdateArrange then reaper.UpdateArrange() end
   end
 
-  -- Clean up any extra project regions whose markrgnidx exceeds #state.subtitles
+  -- Clean up any extra plugin project regions whose index exceeds #state.subtitles
   if reaper.CountProjectMarkers and reaper.EnumProjectMarkers3 and reaper.DeleteProjectMarker then
     local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
     for m = (num_markers or 0) + (num_regions or 0) - 1, 0, -1 do
       local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, m)
-      if retval > 0 and isrgn and markrgnidx > #state.subtitles then
-        reaper.DeleteProjectMarker(0, markrgnidx, true)
+      if retval > 0 and isrgn and actions.is_plugin_region(name) then
+        local parsed_idx = actions.parse_plugin_region(name)
+        local eff_idx = parsed_idx or markrgnidx
+        if eff_idx > #state.subtitles then
+          reaper.DeleteProjectMarker(0, markrgnidx, true)
+        end
       end
     end
     if reaper.UpdateTimeline then reaper.UpdateTimeline() end
