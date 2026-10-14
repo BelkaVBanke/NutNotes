@@ -32,6 +32,9 @@ installer/temp.txt
 reaper_imgui_doc.html
 names_analysis.txt
 
+github_preview_v1_logo.png
+github_preview_v2_logo_text.png
+
 # Файлы REAPER
 *.rpp-bak
 *.RPP-UNDO
