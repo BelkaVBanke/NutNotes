@@ -1,6 +1,6 @@
 --[[
   @description NutNotes - REAPER Subtitle & Dubbing Assistant (ASS & SRT)
-  @version 0.4.0-beta
+  @version 0.4.1-beta
   @author NutNotes Community
   @provides [main] NutNotes.lua
   @requires ReaImGui

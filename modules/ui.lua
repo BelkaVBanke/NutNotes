@@ -1534,10 +1534,103 @@ function ui.render_tab_actors(ctx, state, ImGui)
     ImGui.Text(ctx, string.format("База актеров (всего: %d)", #state.actors))
     ImGui.SameLine(ctx, 0, 16)
 
-    if render_reset_pill_button(ctx, ImGui, "reset_palette", "Сбросить цвета по умолчанию (пастель 360°)", 340) then
-      state.actor_palette = colors.generate_actor_palette(state.actors)
+    if render_reset_pill_button(ctx, ImGui, "reset_palette", "Сбросить цвета по умолчанию (пастель 360°)", 310) then
+      state.actor_palette = colors.generate_actor_palette(state.actors, state.default_region_color or { state.get_default_region_color() })
       state.save_to_project()
       actions.sync_filter_to_timeline(state)
+      if actions.sync_palette_to_timeline then actions.sync_palette_to_timeline(state) end
+    end
+    if ImGui.IsItemHovered(ctx) then
+      set_tooltip(ctx, state, ImGui, "Сбросить палитру цветов актеров на стандартную пастельную (или цвет по умолчанию, если актер только один)")
+    end
+
+    ImGui.Spacing(ctx)
+
+    ImGui.AlignTextToFramePadding(ctx)
+    ImGui.Text(ctx, "Цвет региона по умолчанию:")
+    ImGui.SameLine(ctx, 0, 8)
+
+    local def_r, def_g, def_b = state.get_default_region_color()
+    local cur_rgb = (math.floor(def_r * 255 + 0.5) << 16) | (math.floor(def_g * 255 + 0.5) << 8) | math.floor(def_b * 255 + 0.5)
+    local col_flags = (ImGui.ColorEditFlags_NoInputs or 0) | (ImGui.ColorEditFlags_NoAlpha or 0)
+    local col_changed, new_rgb = ImGui.ColorEdit4(ctx, "##default_region_color", cur_rgb, col_flags)
+    if ImGui.IsItemHovered(ctx) then
+      set_tooltip(ctx, state, ImGui, "Цвет региона по умолчанию (для NoActor или когда все реплики в проекте присвоены одному актеру).")
+    end
+
+    if col_changed then
+      local dr = ((new_rgb >> 16) & 0xFF) / 255
+      local dg = ((new_rgb >> 8) & 0xFF) / 255
+      local db = (new_rgb & 0xFF) / 255
+      state.default_region_color = { dr, dg, db }
+      state.save_settings()
+
+      if not state.actor_palette then state.actor_palette = {} end
+      local u32_pure = ((new_rgb & 0xFFFFFF) << 8) | 0xFF
+      local reaper_col = colors.rgb_to_reaper(dr, dg, db)
+      state.actor_palette["NoActor"] = {
+        r = dr, g = dg, b = db, a = 1.0,
+        u32 = u32_pure,
+        reaper_color = reaper_col,
+        hue = 0
+      }
+
+      local named_actors = {}
+      for _, name in ipairs(state.actors or {}) do
+        if name ~= "NoActor" then
+          table.insert(named_actors, name)
+        end
+      end
+      if #named_actors == 1 then
+        state.actor_palette[named_actors[1]] = {
+          r = dr, g = dg, b = db, a = 1.0,
+          u32 = u32_pure,
+          reaper_color = reaper_col,
+          hue = 0
+        }
+      end
+
+      state.save_to_project()
+      actions.sync_filter_to_timeline(state)
+      if actions.sync_palette_to_timeline then actions.sync_palette_to_timeline(state) end
+    end
+
+    ImGui.SameLine(ctx, 0, 6)
+    if ImGui.Button(ctx, "↺##reset_default_rgn_col") then
+      state.default_region_color = nil
+      state.save_settings()
+
+      local def_r, def_g, def_b = state.get_default_region_color()
+      local u32_pure = (math.floor(def_r * 255 + 0.5) << 24) | (math.floor(def_g * 255 + 0.5) << 16) | (math.floor(def_b * 255 + 0.5) << 8) | 0xFF
+      if not state.actor_palette then state.actor_palette = {} end
+      state.actor_palette["NoActor"] = {
+        r = def_r, g = def_g, b = def_b, a = 1.0,
+        u32 = u32_pure,
+        reaper_color = 0,
+        hue = 0
+      }
+
+      local named_actors = {}
+      for _, name in ipairs(state.actors or {}) do
+        if name ~= "NoActor" then
+          table.insert(named_actors, name)
+        end
+      end
+      if #named_actors == 1 then
+        state.actor_palette[named_actors[1]] = {
+          r = def_r, g = def_g, b = def_b, a = 1.0,
+          u32 = u32_pure,
+          reaper_color = 0,
+          hue = 0
+        }
+      end
+
+      state.save_to_project()
+      actions.sync_filter_to_timeline(state)
+      if actions.sync_palette_to_timeline then actions.sync_palette_to_timeline(state) end
+    end
+    if ImGui.IsItemHovered(ctx) then
+      set_tooltip(ctx, state, ImGui, "Сбросить цвет региона по умолчанию на стандартный цвет темы REAPER")
     end
   end
   end_control_box(ctx, ImGui, open_top)
@@ -1767,6 +1860,7 @@ function ui.render_tab_actors(ctx, state, ImGui)
         }
         state.save_to_project()
         actions.sync_filter_to_timeline(state)
+        if actions.sync_palette_to_timeline then actions.sync_palette_to_timeline(state) end
       end
     end
 
@@ -4189,9 +4283,9 @@ function ui.draw(ctx, state, ImGui)
     if frame_bg_pushed > 0 then
       ImGui.PopStyleColor(ctx, frame_bg_pushed)
     end
-  end
 
-  ImGui.End(ctx)
+    pcall(ImGui.End, ctx)
+  end
 
   is_frame_active = false
 

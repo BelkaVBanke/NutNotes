@@ -7,7 +7,7 @@ local colors = require('colors')
 local parser = require('parser')
 
 local state = {
-  version = "0.4.0-beta",
+  version = "0.4.1-beta",
   -- Project identifier tracker
   last_proj = nil,
 
@@ -56,6 +56,7 @@ local state = {
 
   -- General & Accent settings
   accent_color = { 35 / 255, 35 / 255, 35 / 255 }, -- Default accent RGB: Black (35, 35, 35) (0x232323FF)
+  default_region_color = nil, -- Default region color {r, g, b} for NoActor or single actor (nil = theme default)
   control_box_palette = 1, -- 1: Graphite, 2: Light Tint, 3: Moderate Tint
   watermark_style = 1,     -- 1: Лесной орех и изумрудная дымка, 2: Адаптивная органика, 3: Карамельный орех
 
@@ -361,7 +362,35 @@ function state.get_or_create_state_lane()
   return nil
 end
 
+function state.get_default_region_color()
+  if state.default_region_color and type(state.default_region_color) == "table" then
+    return state.default_region_color[1] or 0.314, state.default_region_color[2] or 0.522, state.default_region_color[3] or 0.522
+  end
+  if reaper and reaper.GetThemeColor then
+    local tc = reaper.GetThemeColor("region", 0)
+    if tc and tc >= 0 then
+      local r = (tc & 0xFF) / 255
+      local g = ((tc >> 8) & 0xFF) / 255
+      local b = ((tc >> 16) & 0xFF) / 255
+      return r, g, b
+    end
+  end
+  return 80 / 255, 133 / 255, 133 / 255
+end
+
+function state.get_default_region_reaper_color()
+  if not state.default_region_color then
+    return 0 -- 0 tells REAPER to use default theme region color
+  end
+  local r, g, b = state.get_default_region_color()
+  return colors.rgb_to_reaper(r, g, b)
+end
+
 local function get_anchor_color()
+  if state.default_region_color then
+    local r, g, b = state.get_default_region_color()
+    return colors.rgb_to_reaper(r, g, b)
+  end
   if reaper and reaper.GetThemeColor then
     local tc = reaper.GetThemeColor("region", 0)
     if tc and tc >= 0 then
@@ -463,6 +492,7 @@ function state.capture_snapshot(action_name)
     subtitles = deep_copy_subtitles(state.subtitles),
     actor_palette = deep_copy_table(state.actor_palette),
     selected_actors = deep_copy_table(state.selected_actors),
+    default_region_color = state.default_region_color and { state.default_region_color[1], state.default_region_color[2], state.default_region_color[3] },
     regions_displayed = has_rgns,
     items_displayed = has_itms,
     name = action_name or "Действие с субтитрами"
@@ -576,6 +606,9 @@ function state.check_reaper_undo_sync(actions)
   if snapshot.selected_actors then
     state.selected_actors = deep_copy_table(snapshot.selected_actors)
   end
+  if snapshot.default_region_color ~= nil then
+    state.default_region_color = snapshot.default_region_color and { snapshot.default_region_color[1], snapshot.default_region_color[2], snapshot.default_region_color[3] }
+  end
 
   state.current_step_id = cur_step
   state.row_heights = {}
@@ -680,7 +713,8 @@ function state.refresh_actors_from_subtitles()
   state.actors = actors_list
   state.actor_counts = actor_counts
   if not state.actor_palette then state.actor_palette = {} end
-  local full_pal = colors.generate_actor_palette(state.actors)
+  local def_col_tbl = state.default_region_color or { state.get_default_region_color() }
+  local full_pal = colors.generate_actor_palette(state.actors, def_col_tbl)
   for _, a in ipairs(state.actors) do
     if not state.actor_palette[a] then
       state.actor_palette[a] = full_pal[a]
@@ -1079,6 +1113,7 @@ function state.get_settings_table()
     text_preview_collapsed = state.text_preview_collapsed,
     -- General & Accent settings
     accent_color = state.accent_color,
+    default_region_color = state.default_region_color,
     control_box_palette = state.control_box_palette,
     watermark_style = state.watermark_style,
     -- Overlay settings
@@ -1146,6 +1181,7 @@ function state.apply_settings_table(s)
   if s.row_alternating_strength ~= nil then state.row_alternating_strength = s.row_alternating_strength end
   if s.text_preview_collapsed ~= nil then state.text_preview_collapsed = s.text_preview_collapsed end
   if s.accent_color then state.accent_color = s.accent_color end
+  if s.default_region_color ~= nil then state.default_region_color = s.default_region_color end
   if s.control_box_palette ~= nil then state.control_box_palette = s.control_box_palette end
   if s.watermark_style ~= nil then state.watermark_style = s.watermark_style end
 
@@ -1343,7 +1379,7 @@ function state.load_file(filepath)
   state.actor_counts = res.actor_counts
 
   -- Generate default pastel palette for actors
-  state.actor_palette = colors.generate_actor_palette(state.actors)
+  state.actor_palette = colors.generate_actor_palette(state.actors, state.default_region_color or { state.get_default_region_color() })
 
   -- Reset filter selection and runtime active state
   state.selected_actors = {}

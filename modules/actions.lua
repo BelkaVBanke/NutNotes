@@ -140,13 +140,14 @@ function actions.create_items(subtitles, palette, state)
       -- Subtitle text in Item Notes
       reaper.GetSetMediaItemInfo_String(item, "P_NOTES", parser.strip_invisible_unicode(sub.text), true)
 
-      -- Item color: gentle pastel from primary actor's palette or default (0)
+      -- Item color: gentle pastel from primary actor's palette or default region color
       local primary_actor = (sub.actors and sub.actors[1]) or sub.actor
       if primary_actor ~= "NoActor" and palette[primary_actor] then
         local col = palette[primary_actor].reaper_color or 0
         reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", col)
       else
-        reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", 0)
+        local def_col = (palette["NoActor"] and palette["NoActor"].reaper_color) or (state and state.get_default_region_reaper_color and state.get_default_region_reaper_color()) or 0
+        reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", def_col)
       end
 
       count_created = count_created + 1
@@ -241,7 +242,13 @@ function actions.set_regions(subtitles, palette, state)
       end
     else
       display_name = single_line_text
-      color = 0 -- Default REAPER color for NoActor
+      if palette["NoActor"] and palette["NoActor"].reaper_color then
+        color = palette["NoActor"].reaper_color
+      elseif state and state.get_default_region_reaper_color then
+        color = state.get_default_region_reaper_color()
+      else
+        color = 0 -- Default REAPER color for NoActor
+      end
     end
 
     local real_idx = (state and state.find_subtitle_index and state.find_subtitle_index(sub)) or i
@@ -258,6 +265,58 @@ function actions.set_regions(subtitles, palette, state)
   end
 
   return count_created
+end
+
+-- Synchronize colors of existing timeline regions and items to current palette
+function actions.sync_palette_to_timeline(state)
+  if not reaper or not reaper.CountProjectMarkers or not reaper.EnumProjectMarkers3 or not reaper.SetProjectMarker3 then return end
+  local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
+  if num_regions > 0 then
+    for m = 0, num_markers + num_regions - 1 do
+      local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, m)
+      if retval > 0 and isrgn and actions.is_plugin_region(name) then
+        local idx = actions.parse_plugin_region(name)
+        if idx and state.subtitles and state.subtitles[idx] then
+          local sub = state.subtitles[idx]
+          local primary_actor = (sub.actors and sub.actors[1]) or sub.actor
+          local rgn_color = 0
+          if primary_actor ~= "NoActor" and state.actor_palette and state.actor_palette[primary_actor] then
+            rgn_color = state.actor_palette[primary_actor].reaper_color or 0
+          else
+            rgn_color = (state.actor_palette and state.actor_palette["NoActor"] and state.actor_palette["NoActor"].reaper_color) or (state.get_default_region_reaper_color and state.get_default_region_reaper_color()) or 0
+          end
+          if color ~= rgn_color then
+            reaper.SetProjectMarker3(0, markrgnidx, true, pos, rgnend, name, rgn_color)
+          end
+        end
+      end
+    end
+    if reaper.UpdateTimeline then reaper.UpdateTimeline() end
+  end
+
+  local tr = actions.find_subtitle_track()
+  if tr and reaper.CountTrackMediaItems and reaper.GetTrackMediaItem and reaper.GetSetMediaItemInfo_String then
+    local num_items = reaper.CountTrackMediaItems(tr)
+    for i = 0, num_items - 1 do
+      local item = reaper.GetTrackMediaItem(tr, i)
+      if item then
+        local _, idx_str = reaper.GetSetMediaItemInfo_String(item, "P_EXT:NUTNOTES_SUB_IDX", "", false)
+        local idx = tonumber(idx_str)
+        if idx and state.subtitles and state.subtitles[idx] then
+          local sub = state.subtitles[idx]
+          local primary_actor = (sub.actors and sub.actors[1]) or sub.actor
+          local itm_color = 0
+          if primary_actor ~= "NoActor" and state.actor_palette and state.actor_palette[primary_actor] then
+            itm_color = state.actor_palette[primary_actor].reaper_color or 0
+          else
+            itm_color = (state.actor_palette and state.actor_palette["NoActor"] and state.actor_palette["NoActor"].reaper_color) or (state.get_default_region_reaper_color and state.get_default_region_reaper_color()) or 0
+          end
+          reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", itm_color)
+        end
+      end
+    end
+    if reaper.UpdateArrange then reaper.UpdateArrange() end
+  end
 end
 
 -- Synchronize both regions and items to the current filter
@@ -1030,7 +1089,8 @@ function actions.update_subtitle_timeline(state, idx)
         if primary_actor ~= "NoActor" and state.actor_palette and state.actor_palette[primary_actor] then
           reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", state.actor_palette[primary_actor].reaper_color or 0)
         else
-          reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", 0)
+          local def_c = (state.actor_palette and state.actor_palette["NoActor"] and state.actor_palette["NoActor"].reaper_color) or (state.get_default_region_reaper_color and state.get_default_region_reaper_color()) or 0
+          reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", def_c)
         end
         reaper.GetSetMediaItemInfo_String(item, "P_NOTES", parser.strip_invisible_unicode(sub.text), true)
         break
@@ -1058,7 +1118,7 @@ function actions.update_subtitle_timeline(state, idx)
           end
         else
           display_name = single_line_text
-          rgn_color = 0
+          rgn_color = (state.actor_palette and state.actor_palette["NoActor"] and state.actor_palette["NoActor"].reaper_color) or (state.get_default_region_reaper_color and state.get_default_region_reaper_color()) or 0
         end
         local tagged_name = actions.tag_region_name(display_name, idx)
         reaper.SetProjectMarker3(0, markrgnidx, true, pos, rgnend, tagged_name, rgn_color)

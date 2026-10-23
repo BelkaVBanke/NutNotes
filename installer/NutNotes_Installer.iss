@@ -4,7 +4,7 @@
 ; =====================================================================
 
 #define MyAppName "NutNotes"
-#define MyAppVersion "0.4.0-beta"
+#define MyAppVersion "0.4.1-beta"
 #define MyAppPublisher "BelkaVBanke"
 #define MyAppURL "https://github.com/BelkaVBanke/NutNotes"
 #define MyAppReleasesURL "https://github.com/BelkaVBanke/NutNotes/releases"

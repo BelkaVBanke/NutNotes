@@ -172,6 +172,10 @@ function overlay.draw(ctx, state, ImGui)
               | ImGui.WindowFlags_NoScrollbar
               | ImGui.WindowFlags_NoCollapse
 
+  if ImGui.WindowFlags_NoDocking then
+    flags = flags | ImGui.WindowFlags_NoDocking
+  end
+
   if ImGui.WindowFlags_NoNavInputs then
     flags = flags | ImGui.WindowFlags_NoNavInputs
   end
@@ -206,6 +210,11 @@ function overlay.draw(ctx, state, ImGui)
 
   -- Initial default size if first time opened
   ImGui.SetNextWindowSize(ctx, 740, 130, ImGui.Cond_FirstUseEver)
+
+  -- Ensure overlay is strictly a floating window, never docked into dockers or other windows
+  if ImGui.SetNextWindowDockID then
+    ImGui.SetNextWindowDockID(ctx, 0)
+  end
 
   is_overlay_frame_active = true
   local visible, open = ImGui.Begin(ctx, "NutNotes (Оверлей)###NUTNOTES_OVERLAY_WINDOW", true, flags)
@@ -1004,9 +1013,8 @@ function overlay.draw(ctx, state, ImGui)
       end
       ImGui.EndDragDropTarget(ctx)
     end
+    pcall(ImGui.End, ctx)
   end
-
-  ImGui.End(ctx)
 
   is_overlay_frame_active = false
 
