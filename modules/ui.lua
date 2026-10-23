@@ -135,6 +135,25 @@ local function set_tooltip(ctx, state, ImGui, text)
   end
 end
 
+-- Helper to open URLs in default browser without freezing the REAPER UI
+local function open_url_async(url)
+  if not url or url == "" then return end
+  if reaper and reaper.CF_ShellExecute then
+    reaper.CF_ShellExecute(url)
+  elseif package.config:sub(1, 1) == "\\" then
+    -- Windows: run via rundll32 or explorer in background without blocking
+    reaper.ExecProcess(string.format('rundll32.exe url.dll,FileProtocolHandler "%s"', url), 0)
+  else
+    -- macOS / Linux
+    local cmd = string.format('open "%s" 2>/dev/null || xdg-open "%s" 2>/dev/null &', url, url)
+    if reaper and reaper.ExecProcess then
+      reaper.ExecProcess(cmd, 0)
+    elseif os and os.execute then
+      os.execute(cmd)
+    end
+  end
+end
+
 -- Resolve accent color into active/hovered/active U32 variants
 local function get_accent_colors(state, ImGui)
   local c = (state and state.accent_color) or { 0.16, 0.55, 0.35 }
@@ -186,8 +205,10 @@ end
 -- Render iOS/mobile style animated toggle switch (Mockup 3)
 -- Returns: changed (bool), new_val (bool)
 local function render_toggle_switch(ctx, state, ImGui, str_id, label, current_val, accent_u32)
-  local width = 36.0
-  local height = 18.0
+  local font_sz = (state and state.ui_font_size) or 11.0
+  local frame_h = (ImGui and ImGui.GetFrameHeight) and ImGui.GetFrameHeight(ctx) or (font_sz * 1.5)
+  local height = math.max(16.0, math.floor(frame_h - 2.0))
+  local width = math.floor(height * 1.85)
   local radius = height * 0.5
 
   local pos_x = ImGui.GetCursorPosX(ctx)
@@ -217,7 +238,7 @@ local function render_toggle_switch(ctx, state, ImGui, str_id, label, current_va
   ImGui.DrawList_AddRectFilled(draw_list, p_min_x, p_min_y, p_min_x + width, p_min_y + height, track_col, radius)
 
   -- Moving knob (circle)
-  local knob_radius = radius - 2.0
+  local knob_radius = math.max(4.0, radius - 2.0)
   local knob_center_y = p_min_y + radius
   local knob_center_x = current_val and (p_min_x + width - radius) or (p_min_x + radius)
 
@@ -236,10 +257,22 @@ local function render_toggle_switch(ctx, state, ImGui, str_id, label, current_va
 end
 
 -- Render modern centered rounded pill button (e.g. "Сбросить") matching Mockup 3
-local function render_reset_pill_button(ctx, ImGui, str_id, label, width)
-  width = width or 140.0
-  local height = 28.0
+local function render_reset_pill_button(ctx, ImGui, str_id, label, width, height, center_in_avail)
+  local font_sz = 11.0
+  if ImGui and ImGui.GetFontSize then
+    font_sz = ImGui.GetFontSize(ctx)
+  end
+  local scale = math.max(0.85, font_sz / 11.0)
+  width = width and (width * scale) or (140.0 * scale)
+  height = height and (height * scale) or math.max(24.0, math.floor(28.0 * scale))
   
+  if center_in_avail then
+    local avail_w, _ = ImGui.GetContentRegionAvail(ctx)
+    if width < avail_w then
+      ImGui.SetCursorPosX(ctx, (avail_w - width) * 0.5)
+    end
+  end
+
   ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameRounding, height * 0.5)
   ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x242A35CC)
   ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0x333C4CAA)
@@ -248,7 +281,7 @@ local function render_reset_pill_button(ctx, ImGui, str_id, label, width)
   ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameBorderSize, 1.0)
   ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0xB0B7C3FF)
 
-  local clicked = ImGui.Button(ctx, label .. "###" .. str_id, width, height)
+  local clicked = ImGui.Button(ctx, (label or "") .. "###" .. str_id, width, height)
 
   ImGui.PopStyleColor(ctx, 5)
   ImGui.PopStyleVar(ctx, 2)
@@ -257,8 +290,13 @@ end
 
 -- Render small modern collapse/expand pill button (e.g. "Свернуть" / "Развернуть")
 local function render_collapse_pill_button(ctx, ImGui, str_id, label, width, height)
-  width = width or 96.0
-  height = height or 22.0
+  local font_sz = 11.0
+  if ImGui and ImGui.GetFontSize then
+    font_sz = ImGui.GetFontSize(ctx)
+  end
+  local scale = math.max(0.85, font_sz / 11.0)
+  width = width and (width * scale) or (96.0 * scale)
+  height = height and (height * scale) or math.max(20.0, math.floor(22.0 * scale))
 
   ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameRounding, height * 0.5)
   ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameBorderSize, 1.0)
@@ -268,7 +306,7 @@ local function render_collapse_pill_button(ctx, ImGui, str_id, label, width, hei
   ImGui.PushStyleColor(ctx, ImGui.Col_Border, 0x3A445688)
   ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0xB0B7C3FF)
 
-  local clicked = ImGui.Button(ctx, label .. "###" .. str_id, width, height)
+  local clicked = ImGui.Button(ctx, (label or "") .. "###" .. str_id, width, height)
 
   ImGui.PopStyleColor(ctx, 5)
   ImGui.PopStyleVar(ctx, 2)
@@ -600,6 +638,72 @@ local function draw_actor_badge(ctx, ImGui, actor, palette, show_border)
   ImGui.Dummy(ctx, 0.0, padding_y)
 end
 
+-- Helper to format actor tag according to text settings:
+-- mode 1: "Актер"
+-- mode 2: "Актер - Персонаж"
+-- Checks for "Все" and truncates to max 24 chars with ellipsis "..."
+local function format_actor_tag(state, sub)
+  if not sub then return "" end
+
+  -- Check if sub has multiple actors or if it represents all actors
+  local raw_a = sub.raw_actor or sub.actor or "NoActor"
+  if raw_a == "NoActor" then return "" end
+
+  -- If raw_a indicates "Все" or matches all project actors
+  local is_all = false
+  if raw_a == "Все" or raw_a == "All" or raw_a == "[Все]" or raw_a == "[All]" then
+    is_all = true
+  elseif state and state.actors and #state.actors > 1 and sub.actors and #sub.actors == #state.actors then
+    is_all = true
+  end
+
+  if is_all then
+    return "Все"
+  end
+
+  local display_mode = (state and state.text_actor_display_mode) or 1
+  local full_text = ""
+
+  if display_mode == 2 then
+    -- Mode 2: "Актер - Персонаж"
+    local actor_name = sub.actor or raw_a
+    local char_name = sub.character or ""
+    if char_name and #char_name > 0 then
+      full_text = actor_name .. " - " .. char_name
+    else
+      -- Check if raw_actor contains dash or brackets with character
+      local dash_idx = raw_a:find("[%-%—%–]")
+      if dash_idx then
+        full_text = raw_a:gsub("^%[", ""):gsub("%]$", "")
+      else
+        full_text = actor_name
+      end
+    end
+  else
+    -- Mode 1 (default): "Актер"
+    full_text = sub.actor or raw_a
+    full_text = full_text:gsub("^%[", ""):gsub("%]$", "")
+  end
+
+  -- Truncate to at most 24 characters (including "...")
+  -- UTF-8 safe character counting
+  local len = utf8 and utf8.len and utf8.len(full_text) or #full_text
+  if len > 24 then
+    if utf8 and utf8.offset then
+      local byte_pos = utf8.offset(full_text, 22) -- 21 chars + "..."
+      if byte_pos then
+        full_text = full_text:sub(1, byte_pos - 1) .. "..."
+      else
+        full_text = full_text:sub(1, 21) .. "..."
+      end
+    else
+      full_text = full_text:sub(1, 21) .. "..."
+    end
+  end
+
+  return full_text
+end
+
 -- Render Subtitles List (used in both standard tab and full-height focus mode)
 function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
   local filtered_subs = state.get_filtered_subtitles()
@@ -631,6 +735,15 @@ function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
 
   local highlight_b = state.text_highlight_brightness or 0.28
 
+  local filter_changed = false
+  if state._applied_filter_revision ~= state.filter_revision then
+    state._applied_filter_revision = state.filter_revision
+    filter_changed = true
+    state.last_centered_idx = -1
+    state.need_calc_scroll_target = true
+    state.suppress_autoscroll_until = 0
+  end
+
   -- 1. Identify current playing and upcoming (lead-in) subtitle
   local current_playing_idx = nil
   local upcoming_idx = nil
@@ -648,11 +761,13 @@ function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
   -- 2. Update active_sub_idx:
   if current_playing_idx then
     state.active_sub_idx = current_playing_idx
+    state.selected_real_sub_idx = state.find_subtitle_index(filtered_subs[current_playing_idx])
   elseif upcoming_idx then
     state.active_sub_idx = upcoming_idx
+    state.selected_real_sub_idx = state.find_subtitle_index(filtered_subs[upcoming_idx])
   else
     local keep_active = false
-    if state.active_sub_idx and filtered_subs[state.active_sub_idx] then
+    if not filter_changed and state.active_sub_idx and filtered_subs[state.active_sub_idx] then
       local cur_sub = filtered_subs[state.active_sub_idx]
       local next_sub = filtered_subs[state.active_sub_idx + 1]
       local next_threshold = next_sub and (next_sub.start_time - lead_in) or nil
@@ -670,15 +785,27 @@ function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
           break
         end
       end
+      -- If cur_time is before the first subtitle in the filtered list, target the first subtitle
+      if not found_idx and #filtered_subs > 0 then
+        found_idx = 1
+      end
       state.active_sub_idx = found_idx
+      if found_idx then
+        state.selected_real_sub_idx = state.find_subtitle_index(filtered_subs[found_idx])
+      end
     end
   end
 
-  -- 3. Auto-centering trigger when active subtitle changes
+  -- 3. Auto-centering trigger when active subtitle changes or filter changed
   local autoscroll_suppressed = (now_precise < (state.suppress_autoscroll_until or 0))
-  if state.auto_scroll and not autoscroll_suppressed and state.active_sub_idx and (state.last_centered_idx ~= state.active_sub_idx) then
-    state.need_calc_scroll_target = true
-    state.last_centered_idx = state.active_sub_idx
+  if state.active_sub_idx then
+    if filter_changed then
+      state.need_calc_scroll_target = true
+      state.last_centered_idx = state.active_sub_idx
+    elseif state.auto_scroll and not autoscroll_suppressed and (state.last_centered_idx ~= state.active_sub_idx) then
+      state.need_calc_scroll_target = true
+      state.last_centered_idx = state.active_sub_idx
+    end
   end
 
   -- Child scrolling window:
@@ -812,9 +939,8 @@ function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
         -- Calculate smooth scroll target position for active subtitle
         if state.need_calc_scroll_target and (i == state.active_sub_idx) then
           local item_content_y = (card_min_y - window_min_y) + cur_scroll_y
-          local target_y = item_content_y - ((state.scroll_center_ratio or 0.40) * child_h)
-          local max_scroll = ImGui.GetScrollMaxY(ctx)
-          state.scroll_target_y = math.max(0.0, math.min(max_scroll, target_y))
+          local target_y = math.max(0.0, item_content_y - ((state.scroll_center_ratio or 0.40) * child_h))
+          state.scroll_target_y = target_y
           state.need_calc_scroll_target = false
         end
 
@@ -881,8 +1007,22 @@ function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
         pop_modern_popup_styles(ctx, ImGui, pop_c, pop_v)
 
         if ImGui.IsItemHovered(ctx) then
-          if ImGui.IsMouseClicked(ctx, 0) then
+          -- Double click on row immediately opens text editing modal
+          local is_double_clicked = (ImGui.IsMouseDoubleClicked and ImGui.IsMouseDoubleClicked(ctx, 0))
+          if is_double_clicked then
+            local real_idx = state.find_subtitle_index(sub) or i
+            state.text_edit_idx = real_idx
+            state.text_edit_content = parser.strip_invisible_unicode(sub.text)
+            state.open_text_edit_popup = true
+            state.text_edit_focused = false
             state.active_sub_idx = i
+            state.selected_real_sub_idx = real_idx
+            state.user_selected_row_idx = real_idx
+          elseif ImGui.IsMouseClicked(ctx, 0) then
+            local real_idx = state.find_subtitle_index(sub) or i
+            state.active_sub_idx = i
+            state.selected_real_sub_idx = real_idx
+            state.user_selected_row_idx = real_idx
             local scroll_mode = state.auto_scroll_mode or 2
             local is_reaper_playing = reaper and ((reaper.GetPlayState() & 1) ~= 0)
             local should_scroll = false
@@ -905,14 +1045,16 @@ function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
             end
 
             actions.jump_to_time(sub.start_time)
-            actions.return_focus_to_reaper()
+            -- Note: focus stays in NutNotes so Delete/Ctrl+Z hotkeys keep working
           end
 
           local tip_actor = sub.raw_actor or sub.actor
           if sub.character and #sub.character > 0 then
-            set_tooltip(ctx, state, ImGui, string.format("Актер: %s\nПерсонаж: %s", sub.actor, sub.character))
+            set_tooltip(ctx, state, ImGui, string.format("Актер: %s\nПерсонаж: %s\n(Дабл-клик — редактировать текст)", sub.actor, sub.character))
           elseif tip_actor and tip_actor ~= "NoActor" then
-            set_tooltip(ctx, state, ImGui, string.format("Актер: %s", tip_actor))
+            set_tooltip(ctx, state, ImGui, string.format("Актер: %s\n(Дабл-клик — редактировать текст)", tip_actor))
+          else
+            set_tooltip(ctx, state, ImGui, "Дабл-клик — редактировать текст")
           end
         end
 
@@ -944,17 +1086,19 @@ function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
           tb = 0.18 + pal.b * 0.82
         end
 
-        if single_actor_selected then
+        if single_actor_selected or not state.text_tint_lines then
+          local base_c = state.text_custom_color or { 175 / 255, 175 / 255, 175 / 255 }
+          local cr, cg, cb = base_c[1] or 0.68, base_c[2] or 0.68, base_c[3] or 0.68
           if is_playing then
             text_u32 = 0xFFFFFFFF
           elseif is_upcoming then
             local lead_p = math.max(0.0, math.min(1.0, (cur_time - (sub.start_time - lead_in)) / math.max(0.001, lead_in)))
-            local val = 0xD4 + (0xFF - 0xD4) * lead_p
-            text_u32 = ImGui.ColorConvertDouble4ToU32(val / 255.0, val / 255.0, val / 255.0, 1.0)
+            local factor = 1.0 + (1.25 - 1.0) * lead_p
+            text_u32 = ImGui.ColorConvertDouble4ToU32(math.min(1.0, cr * factor), math.min(1.0, cg * factor), math.min(1.0, cb * factor), 1.0)
           elseif is_persisted then
-            text_u32 = 0xD4D4D4FF
+            text_u32 = ImGui.ColorConvertDouble4ToU32(math.min(1.0, cr * 1.15), math.min(1.0, cg * 1.15), math.min(1.0, cb * 1.15), 1.0)
           else
-            text_u32 = 0xAFAFAFFF
+            text_u32 = ImGui.ColorConvertDouble4ToU32(cr, cg, cb, 1.0)
           end
         else
           if pal and actor_for_color ~= "NoActor" then
@@ -1002,7 +1146,24 @@ function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
         ImGui.Text(ctx, time_str)
         ImGui.PopStyleColor(ctx, 1)
 
-        ImGui.SameLine(ctx, 0, 12.0)
+        -- Optional Actor Badge in Row between time and text
+        if state.show_actor_in_row then
+          local formatted_tag = format_actor_tag(state, sub)
+          if formatted_tag and #formatted_tag > 0 then
+            ImGui.SameLine(ctx, 0, 8.0)
+            local badge_actor = sub.raw_actor or sub.actor or "NoActor"
+            local act_pal = state.actor_palette and (state.actor_palette[badge_actor] or (sub.actor and state.actor_palette[sub.actor]))
+            local badge_col = 0xCCCCCCFF
+            if state.text_tint_actor_names then
+              badge_col = (act_pal and act_pal.u32) or 0x888888FF
+            end
+            ImGui.PushStyleColor(ctx, ImGui.Col_Text, badge_col)
+            ImGui.Text(ctx, "[" .. formatted_tag .. "]")
+            ImGui.PopStyleColor(ctx, 1)
+          end
+        end
+
+        ImGui.SameLine(ctx, 0, 10.0)
 
         ImGui.PushStyleColor(ctx, ImGui.Col_Text, text_u32)
         ImGui.TextWrapped(ctx, single_line)
@@ -1075,7 +1236,7 @@ function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
     if state.scroll_target_y then
       local cur_scroll = ImGui.GetScrollY(ctx)
       local diff = state.scroll_target_y - cur_scroll
-      if not state.smooth_scroll_enabled or math.abs(diff) < 0.8 then
+      if not state.smooth_scroll_enabled or filter_changed or math.abs(diff) < 0.8 then
         ImGui.SetScrollY(ctx, state.scroll_target_y)
         state.scroll_target_y = nil
       else
@@ -1125,7 +1286,7 @@ function ui.render_tab_subtitles(ctx, state, ImGui)
     ImGui.PopStyleColor(ctx, 1)
     ImGui.SameLine(ctx, 0, 8.0)
 
-    ImGui.SetNextItemWidth(ctx, 220)
+    ImGui.SetNextItemWidth(ctx, 200)
     local combo_preview = #state.selected_actors > 0 and "(добавить актера...)" or "Все актеры (без фильтра)"
 
     local p_cols, p_vars = push_modern_combo_styles(ctx, ImGui, state)
@@ -1145,6 +1306,47 @@ function ui.render_tab_subtitles(ctx, state, ImGui)
       ImGui.EndCombo(ctx)
     end
     pop_modern_combo_styles(ctx, ImGui, p_cols, p_vars)
+
+    -- Text Search Field on the same row or right side
+    ImGui.SameLine(ctx, 0, 16.0)
+    ImGui.AlignTextToFramePadding(ctx)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0xB0B7C3FF)
+    ImGui.Text(ctx, "🔍 Поиск:")
+    ImGui.PopStyleColor(ctx, 1)
+    ImGui.SameLine(ctx, 0, 6.0)
+
+    ImGui.SetNextItemWidth(ctx, 180)
+    local search_changed, new_query
+    if ImGui.InputTextWithHint then
+      search_changed, new_query = ImGui.InputTextWithHint(ctx, "##sub_text_search", "текст саба...", state.search_query or "", 256)
+    else
+      search_changed, new_query = ImGui.InputText(ctx, "##sub_text_search", state.search_query or "", 256)
+    end
+    if search_changed then
+      state.search_query = new_query
+      state.filter_revision = (state.filter_revision or 0) + 1
+      state.last_centered_idx = -1
+      state.need_calc_scroll_target = true
+      state.suppress_autoscroll_until = 0
+      state.scroll_target_y = nil
+      actions.sync_filter_to_timeline(state)
+    end
+
+    if state.search_query and #state.search_query > 0 then
+      ImGui.SameLine(ctx, 0, 4.0)
+      if ImGui.Button(ctx, "✕##clear_search") then
+        state.search_query = ""
+        state.filter_revision = (state.filter_revision or 0) + 1
+        state.last_centered_idx = -1
+        state.need_calc_scroll_target = true
+        state.suppress_autoscroll_until = 0
+        state.scroll_target_y = nil
+        actions.sync_filter_to_timeline(state)
+      end
+      if ImGui.IsItemHovered(ctx) then
+        set_tooltip(ctx, state, ImGui, "Очистить строку поиска")
+      end
+    end
 
     -- Filter tags panel below dropdown
     if #state.selected_actors > 0 then
@@ -1225,64 +1427,90 @@ function ui.render_tab_subtitles(ctx, state, ImGui)
     ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameRounding, 6.0)
     ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, 10.0, 5.0)
 
-    -- Button: Задать регионы (Deep emerald green)
-    ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x1E5E3AEE)
-    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0x2A7C4DEE)
-    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0x36965DEE)
-    if ImGui.Button(ctx, "🚩 Задать регионы") then
-      local subs_to_use = state.sync_with_filter and filtered_subs or state.subtitles
-      actions.set_regions(subs_to_use, state.actor_palette, state)
-    end
-    ImGui.PopStyleColor(ctx, 3)
+    local has_rgns = actions.has_plugin_regions and actions.has_plugin_regions()
+    local has_itms = actions.has_track_items and actions.has_track_items()
 
-    if ImGui.IsItemHovered(ctx) then
-      set_tooltip(ctx, state, ImGui, "Удаляет все текущие регионы в проекте и создает новые на основе субтитров")
-    end
-
-    ImGui.SameLine(ctx, 0, 8)
-
-    -- Button: Очистить регионы (Dark crimson burgundy)
-    ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x6E2528EE)
-    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0x8C3236EE)
-    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0xA83D42EE)
-    if ImGui.Button(ctx, "🗑️ Очистить регионы") then
-      actions.clear_regions_with_undo()
-    end
-    ImGui.PopStyleColor(ctx, 3)
-
-    if ImGui.IsItemHovered(ctx) then
-      set_tooltip(ctx, state, ImGui, "Удаляет все регионы из проекта REAPER")
-    end
-
-    ImGui.SameLine(ctx, 0, 8)
-
-    -- Button: Создать items (Deep sapphire / Slate blue)
-    ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x1D4E89EE)
-    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0x2764ABEE)
-    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0x327AC8EE)
-    if ImGui.Button(ctx, "🎞️ Создать items") then
-      local subs_to_use = state.sync_with_filter and filtered_subs or state.subtitles
-      actions.create_items(subs_to_use, state.actor_palette, state)
-    end
-    ImGui.PopStyleColor(ctx, 3)
-
-    if ImGui.IsItemHovered(ctx) then
-      set_tooltip(ctx, state, ImGui, "Создает/наполняет трек 'sub-items-track' айтемами с именем актера и заметками текста")
+    -- Button 1: Toggle Регионы (2 states: Green to set / Red to clear)
+    if has_rgns then
+      -- State 2: Active / Displayed -> Red button to clear/hide
+      ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x8B262Bee)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0xA83238ee)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0xC43E44ee)
+      if ImGui.Button(ctx, "🚩 Регионы ✕") then
+        actions.clear_regions_with_undo()
+      end
+      ImGui.PopStyleColor(ctx, 3)
+      if ImGui.IsItemHovered(ctx) then
+        set_tooltip(ctx, state, ImGui, "Регионы субтитров сейчас активны в REAPER.\nНажмите, чтобы удалить / скрыть их.")
+      end
+    else
+      -- State 1: Inactive -> Green button to enable
+      ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x1E5E3AEE)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0x2A7C4DEE)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0x36965DEE)
+      if ImGui.Button(ctx, "🚩 Регионы ➕") then
+        local subs_to_use = state.sync_with_filter and filtered_subs or state.subtitles
+        actions.set_regions(subs_to_use, state.actor_palette, state)
+      end
+      ImGui.PopStyleColor(ctx, 3)
+      if ImGui.IsItemHovered(ctx) then
+        set_tooltip(ctx, state, ImGui, "Регионы субтитров выключены.\nНажмите, чтобы создать регионы субтитров в REAPER.")
+      end
     end
 
     ImGui.SameLine(ctx, 0, 8)
 
-    -- Button: Очистить трек (Dark crimson burgundy)
-    ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x6E2528EE)
-    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0x8C3236EE)
-    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0xA83D42EE)
-    if ImGui.Button(ctx, "🗑️ Очистить трек") then
-      actions.clear_subtitle_track()
+    -- Button 2: Toggle Items (2 states: Blue/Green to create / Red to clear)
+    if has_itms then
+      -- State 2: Active / Displayed -> Red button to clear/hide
+      ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x8B262Bee)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0xA83238ee)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0xC43E44ee)
+      if ImGui.Button(ctx, "🎞️ Items ✕") then
+        actions.clear_subtitle_track()
+      end
+      ImGui.PopStyleColor(ctx, 3)
+      if ImGui.IsItemHovered(ctx) then
+        set_tooltip(ctx, state, ImGui, "Айтемы на треке 'sub-items-track' активны.\nНажмите, чтобы удалить / очистить айтемы с трека.")
+      end
+    else
+      -- State 1: Inactive -> Slate Blue/Green button to create
+      ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x1D4E89EE)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0x2764ABEE)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0x327AC8EE)
+      if ImGui.Button(ctx, "🎞️ Items ➕") then
+        local subs_to_use = state.sync_with_filter and filtered_subs or state.subtitles
+        actions.create_items(subs_to_use, state.actor_palette, state)
+      end
+      ImGui.PopStyleColor(ctx, 3)
+      if ImGui.IsItemHovered(ctx) then
+        set_tooltip(ctx, state, ImGui, "Айтемы на треке 'sub-items-track' отсутствуют.\nНажмите, чтобы создать айтемы на треке.")
+      end
+    end
+
+    ImGui.SameLine(ctx, 0, 8)
+
+    -- Button 3: Создать строку (По Time Selection)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x2A3E5Cee)
+    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0x38537Aee)
+    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0x48699Aee)
+    if ImGui.Button(ctx, "➕ Создать строку") then
+      actions.create_subtitle_from_time_selection(state)
     end
     ImGui.PopStyleColor(ctx, 3)
 
     if ImGui.IsItemHovered(ctx) then
-      set_tooltip(ctx, state, ImGui, "Удаляет все айтемы с трека 'sub-items-track'")
+      set_tooltip(ctx, state, ImGui, "Создает субтитр (noActor) по текущему Time Selection в REAPER.\nХоткей: " .. (state.hotkey_create_sub or "Shift+T"))
+    end
+
+    -- Optional red error toast indicator if time selection was missing
+    local now_p = (reaper and reaper.time_precise and reaper.time_precise()) or os.clock()
+    if state.time_selection_error_msg and now_p < (state.time_selection_error_until or 0) then
+      ImGui.SameLine(ctx, 0, 10.0)
+      ImGui.AlignTextToFramePadding(ctx)
+      ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0xFF4D4DFF) -- Bright Red warning text
+      ImGui.Text(ctx, "⚠️ " .. state.time_selection_error_msg)
+      ImGui.PopStyleColor(ctx, 1)
     end
 
     ImGui.PopStyleVar(ctx, 2)
@@ -1559,8 +1787,10 @@ local function render_text_preview_card(ctx, state, ImGui, act_acc)
     local avail_w, _ = ImGui.GetContentRegionAvail(ctx)
     local title = "ПРЕДПРОСМОТР ТЕКСТА"
     local btn_label = is_collapsed and "Развернуть" or "Свернуть"
-    local btn_w = 96.0
-    local btn_h = 22.0
+    local font_sz = (state and state.ui_font_size) or 11.0
+    local scale = math.max(0.85, font_sz / 11.0)
+    local btn_w = math.floor(96.0 * scale)
+    local btn_h = math.max(22.0, math.floor(22.0 * scale))
 
     -- Header row: Title on the left with accent indicator bar, Collapse button on the right
     local p_min_x, p_min_y = ImGui.GetCursorScreenPos(ctx)
@@ -1612,9 +1842,9 @@ local function render_text_preview_card(ctx, state, ImGui, act_acc)
       local highlight_b = state.text_highlight_brightness or 0.28
 
       local sample_lines = {
-        { time = "[00:01:14.200]", text = "предыдущая реплика", is_act = false, col = 0x88C0D0FF, row_idx = 1 },
-        { time = "[00:01:18.500]", text = "текущая реплика", is_act = true, col = 0xFFFFFFFF, row_idx = 2 },
-        { time = "[00:01:23.000]", text = "следующая реплика", is_act = false, col = 0xE5C07BFF, row_idx = 3 },
+        { time = "[00:01:14.200]", text = "предыдущая реплика", actor = "ActorA", raw_actor = "ActorA - CharacterA", character = "CharacterA", is_act = false, col = 0x88C0D0FF, row_idx = 1 },
+        { time = "[00:01:18.500]", text = "текущая реплика", actor = "ActorB", raw_actor = "ActorB - CharacterB", character = "CharacterB", is_act = true, col = 0xFFFFFFFF, row_idx = 2 },
+        { time = "[00:01:23.000]", text = "следующая реплика", actor = "ActorC", raw_actor = "ActorC - CharacterC", character = "CharacterC", is_act = false, col = 0xE5C07BFF, row_idx = 3 },
       }
 
       local pad_x = 8.0
@@ -1681,10 +1911,34 @@ local function render_text_preview_card(ctx, state, ImGui, act_acc)
         ImGui.Text(ctx, item.time)
         ImGui.PopStyleColor(ctx, 1)
 
-        ImGui.SameLine(ctx, 0, 12.0)
+        -- Optional Actor Badge in preview
+        if state.show_actor_in_row then
+          local formatted_tag = format_actor_tag(state, item)
+          if formatted_tag and #formatted_tag > 0 then
+            ImGui.SameLine(ctx, 0, 8.0)
+            local badge_col = 0xCCCCCCFF
+            if state.text_tint_actor_names then
+              badge_col = item.col
+            end
+            ImGui.PushStyleColor(ctx, ImGui.Col_Text, badge_col)
+            ImGui.Text(ctx, "[" .. formatted_tag .. "]")
+            ImGui.PopStyleColor(ctx, 1)
+          end
+        end
 
-        -- Subtitle text
-        ImGui.PushStyleColor(ctx, ImGui.Col_Text, item.col)
+        ImGui.SameLine(ctx, 0, 10.0)
+
+        -- Subtitle text with optional tinting
+        local txt_col = 0xFFFFFFFF
+        if not is_cur then
+          if state.text_tint_lines then
+            txt_col = item.col
+          else
+            local tc = state.text_custom_color or { 175 / 255, 175 / 255, 175 / 255 }
+            txt_col = ImGui.ColorConvertDouble4ToU32(tc[1] or 0.68, tc[2] or 0.68, tc[3] or 0.68, 1.0)
+          end
+        end
+        ImGui.PushStyleColor(ctx, ImGui.Col_Text, txt_col)
         ImGui.TextWrapped(ctx, item.text)
         ImGui.PopStyleColor(ctx, 1)
 
@@ -1838,7 +2092,124 @@ function ui.render_tab_text_settings(ctx, state, ImGui)
   end
   end_control_box(ctx, ImGui, open_c1)
 
-  -- 2. ROW EMPHASIS & SMOOTHNESS CARD
+  -- 2. ACTORS DISPLAY & COLORING CARD
+  local open_c_act = begin_control_box(ctx, state, ImGui, "txt_actors_display_card")
+  if open_c_act then
+    render_section_header(ctx, ImGui, "ОТОБРАЖЕНИЕ И ЦВЕТА АКТЕРОВ В СТРОКЕ", act_acc)
+
+    -- Toggle 1: Отображать актера в строке
+    local rv_act_row, new_act_row = render_toggle_switch(ctx, state, ImGui, "txt_act_row", "Отображать актера в строке", state.show_actor_in_row, act_acc)
+    if rv_act_row then
+      state.show_actor_in_row = new_act_row
+      state.row_heights = {}
+      state.save_settings()
+    end
+    if ImGui.IsItemHovered(ctx) then
+      set_tooltip(ctx, state, ImGui, "Показывает тег актера в начале каждой строки субтитра между таймингом и текстом реплики.")
+    end
+
+    -- Sub-options for Actor Tag Display (shown when toggle is active)
+    if state.show_actor_in_row then
+      ImGui.Indent(ctx, 24)
+
+      ImGui.AlignTextToFramePadding(ctx)
+      ImGui.Text(ctx, "Показывать:")
+      ImGui.SameLine(ctx, 0, 10.0)
+
+      local actor_display_options = {
+        { id = 1, name = "Актер" },
+        { id = 2, name = "Актер - Персонаж" },
+      }
+      local cur_mode = state.text_actor_display_mode or 1
+      local cur_mode_str = (cur_mode == 2) and "Актер - Персонаж" or "Актер"
+
+      ImGui.SetNextItemWidth(ctx, 190)
+      local p_cols_dm, p_vars_dm = push_modern_combo_styles(ctx, ImGui, state)
+      if ImGui.BeginCombo(ctx, "##actor_display_mode_combo", cur_mode_str) then
+        for _, opt in ipairs(actor_display_options) do
+          local is_sel = (cur_mode == opt.id)
+          if ImGui.Selectable(ctx, opt.name, is_sel) then
+            state.text_actor_display_mode = opt.id
+            state.row_heights = {}
+            state.save_settings()
+          end
+          if is_sel then
+            ImGui.SetItemDefaultFocus(ctx)
+          end
+        end
+        ImGui.EndCombo(ctx)
+      end
+      pop_modern_combo_styles(ctx, ImGui, p_cols_dm, p_vars_dm)
+
+      if ImGui.IsItemHovered(ctx) then
+        set_tooltip(ctx, state, ImGui, "Актер: выводит только имя актера.\nАктер - Персонаж: выводит имя актера и имя персонажа (при наличии).\nЕсли реплика общая для всех актеров, отображается 'Все'. Длинные имена сокращаются до 24 символов.")
+      end
+
+      -- Toggle: Подкрашивать имена актеров
+      local rv_tint_act, new_tint_act = render_toggle_switch(ctx, state, ImGui, "txt_tint_act", "Подкрашивать имена актеров", state.text_tint_actor_names, act_acc)
+      if rv_tint_act then
+        state.text_tint_actor_names = new_tint_act
+        state.save_settings()
+      end
+      if ImGui.IsItemHovered(ctx) then
+        set_tooltip(ctx, state, ImGui, "Окрашивает тег [Имя] в строке персональным цветом актера из палитры.")
+      end
+
+      ImGui.Unindent(ctx, 24)
+    end
+
+    ImGui.Spacing(ctx)
+
+    -- Toggle: Подкрашивать строки цветом актера
+    local rv_tint_ln, new_tint_ln = render_toggle_switch(ctx, state, ImGui, "txt_tint_lines", "Подкрашивать строки цветом актера", state.text_tint_lines, act_acc)
+    if rv_tint_ln then
+      state.text_tint_lines = new_tint_ln
+      state.save_settings()
+    end
+    if ImGui.IsItemHovered(ctx) then
+      set_tooltip(ctx, state, ImGui, "Подкрашивает весь текст реплики цветом актера из палитры. Если выключено — строки отображаются выбранным цветом.")
+    end
+
+    if not state.text_tint_lines then
+      ImGui.Indent(ctx, 24)
+      ImGui.AlignTextToFramePadding(ctx)
+      ImGui.Text(ctx, "Цвет текста строк:")
+      ImGui.SameLine(ctx, 0, 10.0)
+
+      local cur_tc = state.text_custom_color or { 175 / 255, 175 / 255, 175 / 255 }
+      local tir = math.floor((cur_tc[1] or 0.68) * 255 + 0.5)
+      local tig = math.floor((cur_tc[2] or 0.68) * 255 + 0.5)
+      local tib = math.floor((cur_tc[3] or 0.68) * 255 + 0.5)
+      local cur_t_rgb = ((tir & 0xFF) << 16) | ((tig & 0xFF) << 8) | (tib & 0xFF)
+
+      ImGui.SetNextItemWidth(ctx, 160)
+      local rv_tcol, new_t_rgb = ImGui.ColorEdit3(ctx, "##txt_custom_col", cur_t_rgb)
+      if rv_tcol then
+        local tr = ((new_t_rgb >> 16) & 0xFF) / 255
+        local tg = ((new_t_rgb >> 8) & 0xFF) / 255
+        local tb = (new_t_rgb & 0xFF) / 255
+        state.text_custom_color = { tr, tg, tb }
+        state.save_settings()
+      end
+      if ImGui.IsItemHovered(ctx) then
+        set_tooltip(ctx, state, ImGui, "Выбор основного монохромного цвета текста строк субтитров, когда отключено подкрашивание цветом актера.")
+      end
+
+      ImGui.SameLine(ctx, 0, 8.0)
+      if render_reset_pill_button(ctx, ImGui, "reset_txt_col", "Сбросить", 90.0) then
+        state.text_custom_color = { 175 / 255, 175 / 255, 175 / 255 }
+        state.save_settings()
+      end
+      if ImGui.IsItemHovered(ctx) then
+        set_tooltip(ctx, state, ImGui, "Вернуть дефолтный нейтральный серый цвет (#AFAFAF)")
+      end
+
+      ImGui.Unindent(ctx, 24)
+    end
+  end
+  end_control_box(ctx, ImGui, open_c_act)
+
+  -- 3. ROW EMPHASIS & SMOOTHNESS CARD
   local open_c2 = begin_control_box(ctx, state, ImGui, "txt_emphasis_card")
   if open_c2 then
     render_section_header(ctx, ImGui, "ВЫДЕЛЕНИЕ ТЕКУЩЕЙ СТРОКИ", act_acc)
@@ -1941,11 +2312,8 @@ function ui.render_tab_text_settings(ctx, state, ImGui)
   -- 3. RESET BUTTON CARD
   local open_c3 = begin_control_box(ctx, state, ImGui, "txt_reset_card", 44.0)
   if open_c3 then
-    local avail_w, _ = ImGui.GetContentRegionAvail(ctx)
     local btn_w = 260.0
-    ImGui.SetCursorPosX(ctx, (avail_w - btn_w) * 0.5)
-
-    if render_reset_pill_button(ctx, ImGui, "reset_text_settings", "Сбросить настройки текста", btn_w) then
+    if render_reset_pill_button(ctx, ImGui, "reset_text_settings", "Сбросить настройки текста", btn_w, nil, true) then
       state.text_font_family = "Segoe UI"
       state.text_font_size = 18.0
       state.scroll_center_ratio = 0.40
@@ -1961,6 +2329,11 @@ function ui.render_tab_text_settings(ctx, state, ImGui)
       state.row_alternating_strength = 0.07
       state.focus_mode = false
       state.auto_scroll_mode = 3
+      state.show_actor_in_row = false
+      state.text_actor_display_mode = 1
+      state.text_tint_lines = true
+      state.text_custom_color = { 175 / 255, 175 / 255, 175 / 255 }
+      state.text_tint_actor_names = true
       state.row_heights = {}
       state.save_settings()
     end
@@ -1981,21 +2354,25 @@ function ui.render_tab_overlay(ctx, state, ImGui)
   if open_ov1 then
     render_section_header(ctx, ImGui, "СТАТУС И УПРАВЛЕНИЕ ОКНОМ", act_acc)
 
+    local btn_scale = math.max(0.85, ((state and state.ui_font_size) or 11.0) / 11.0)
+    local ov_btn_w = math.floor(220 * btn_scale)
+    local ov_btn_h = math.floor(34 * btn_scale)
+
     ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameRounding, 6.0)
     if state.overlay_enabled then
       ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x8A2C2CEE)
       ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0xA83838EE)
       ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0xC04040EE)
-      if ImGui.Button(ctx, "✕ Выключить оверлей", 220, 34) then
+      if ImGui.Button(ctx, "✕ Выключить оверлей", ov_btn_w, ov_btn_h) then
         state.overlay_enabled = false
         state.save_settings()
       end
       ImGui.PopStyleColor(ctx, 3)
     else
-      ImGui.PushStyleColor(ctx, ImGui.Col_Button, base_acc)
-      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, hov_acc)
-      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, act_acc)
-      if ImGui.Button(ctx, "▶ Включить оверлей", 220, 34) then
+      ImGui.PushStyleColor(ctx, ImGui.Col_Button, 0x1E5E3AEE)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, 0x2A7C4DEE)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0x36965DEE)
+      if ImGui.Button(ctx, "▶ Включить оверлей", ov_btn_w, ov_btn_h) then
         state.overlay_enabled = true
         state.save_settings()
       end
@@ -2028,6 +2405,15 @@ function ui.render_tab_overlay(ctx, state, ImGui)
     end
     if ImGui.IsItemHovered(ctx) then
       set_tooltip(ctx, state, ImGui, "Отображает под прогресс-баром следующую реплику меньшим шрифтом.\nВ паузах плавно подготавливает грядущую строку и ведет обратный отсчет.")
+    end
+
+    local rv_hide_prog, new_hide_prog = render_toggle_switch(ctx, state, ImGui, "ov_hide_prog", "Скрыть прогресс реплики", state.overlay_hide_progress, act_acc)
+    if rv_hide_prog then
+      state.overlay_hide_progress = new_hide_prog
+      state.save_settings()
+    end
+    if ImGui.IsItemHovered(ctx) then
+      set_tooltip(ctx, state, ImGui, "Убирает полосу прогресса текущей реплики и обратного отсчета из окна оверлея.")
     end
 
     local single_actor_filtered = (not state.overlay_show_all_actors and #state.selected_actors == 1)
@@ -2127,21 +2513,21 @@ function ui.render_tab_overlay(ctx, state, ImGui)
     render_section_header(ctx, ImGui, "РАЗМЕРЫ ШРИФТОВ ОВЕРЛЕЯ", act_acc)
 
     ImGui.Text(ctx, "Размер текста реплики (px):")
-    local rv_fsize, new_fsize = render_modern_slider(ctx, state, ImGui, "ov_fsize", state.overlay_font_size or 24.0, 14.0, 48.0, "%.0f", act_acc, 260)
+    local rv_fsize, new_fsize = render_modern_slider(ctx, state, ImGui, "ov_fsize", state.overlay_font_size or 24.0, 14.0, 96.0, "%.0f", act_acc, 260)
     if rv_fsize then
       state.overlay_font_size = new_fsize
       state.save_settings()
     end
 
     ImGui.Text(ctx, "Размер шрифта актера (px):")
-    local rv_act_fsize, new_act_fsize = render_modern_slider(ctx, state, ImGui, "ov_act_fsize", state.overlay_actor_font_size or 18.0, 10.0, 36.0, "%.0f", act_acc, 260)
+    local rv_act_fsize, new_act_fsize = render_modern_slider(ctx, state, ImGui, "ov_act_fsize", state.overlay_actor_font_size or 18.0, 10.0, 72.0, "%.0f", act_acc, 260)
     if rv_act_fsize then
       state.overlay_actor_font_size = new_act_fsize
       state.save_settings()
     end
 
     ImGui.Text(ctx, "Размер текста следующей реплики (px):")
-    local rv_nxt_fsize, new_nxt_fsize = render_modern_slider(ctx, state, ImGui, "ov_nxt_fsize", state.overlay_next_font_size or 16.0, 10.0, 36.0, "%.0f", act_acc, 260)
+    local rv_nxt_fsize, new_nxt_fsize = render_modern_slider(ctx, state, ImGui, "ov_nxt_fsize", state.overlay_next_font_size or 16.0, 10.0, 72.0, "%.0f", act_acc, 260)
     if rv_nxt_fsize then
       state.overlay_next_font_size = new_nxt_fsize
       state.save_settings()
@@ -2204,11 +2590,8 @@ function ui.render_tab_overlay(ctx, state, ImGui)
   -- 3. RESET BUTTON CARD
   local open_ov3 = begin_control_box(ctx, state, ImGui, "ov_card_reset", 44.0)
   if open_ov3 then
-    local avail_w, _ = ImGui.GetContentRegionAvail(ctx)
     local btn_w = 260.0
-    ImGui.SetCursorPosX(ctx, (avail_w - btn_w) * 0.5)
-
-    if render_reset_pill_button(ctx, ImGui, "reset_overlay_fonts", "Сбросить настройки оверлея", btn_w) then
+    if render_reset_pill_button(ctx, ImGui, "reset_overlay_fonts", "Сбросить настройки оверлея", btn_w, nil, true) then
       state.overlay_font_size = 24.0
       state.overlay_actor_font_size = 18.0
       state.overlay_next_font_size = 16.0
@@ -2249,14 +2632,17 @@ function ui.render_tab_general(ctx, state, ImGui)
     ImGui.SameLine(ctx, 0, 8)
 
     local presets = {
-      { name = "Изумруд", rgb = { 0.16, 0.55, 0.35 }, col = 0x298C59FF },
-      { name = "Синий", rgb = { 0.20, 0.45, 0.75 }, col = 0x3373BFFF },
-      { name = "Бирюза", rgb = { 0.12, 0.58, 0.58 }, col = 0x1E9494FF },
-      { name = "Янтарь", rgb = { 0.75, 0.48, 0.15 }, col = 0xBF7A26FF },
-      { name = "Пурпур", rgb = { 0.50, 0.32, 0.72 }, col = 0x8052B8FF },
+      { name = "Черный", rgb = { 35 / 255, 35 / 255, 35 / 255 }, col = 0x232323FF },
+      { name = "Изумруд", rgb = { 0.14, 0.48, 0.30 }, col = 0x247A4DFF },
+      { name = "Синий", rgb = { 0.18, 0.40, 0.68 }, col = 0x2E66ADFF },
+      { name = "Бирюза", rgb = { 0.10, 0.50, 0.50 }, col = 0x1A8080FF },
+      { name = "Янтарь", rgb = { 0.68, 0.42, 0.14 }, col = 0xAD6B24FF },
+      { name = "Пурпур", rgb = { 0.44, 0.28, 0.64 }, col = 0x7047A3FF },
     }
 
     ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameRounding, 4.0)
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameBorderSize, 1.0)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Border, 0xCCCCCC66)
     for _, pr in ipairs(presets) do
       ImGui.PushStyleColor(ctx, ImGui.Col_Button, pr.col)
       ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, pr.col)
@@ -2270,17 +2656,18 @@ function ui.render_tab_general(ctx, state, ImGui)
       ImGui.SameLine(ctx, 0, 6)
     end
     ImGui.NewLine(ctx)
-    ImGui.PopStyleVar(ctx, 1)
+    ImGui.PopStyleColor(ctx, 1)
+    ImGui.PopStyleVar(ctx, 2)
 
     -- Row 2: Custom color picker
     ImGui.AlignTextToFramePadding(ctx)
     ImGui.TextDisabled(ctx, "Задать свой цвет:")
     ImGui.SameLine(ctx, 0, 8)
 
-    local cur_acc = state.accent_color or { 0.16, 0.55, 0.35 }
-    local ir = math.floor((cur_acc[1] or 0.16) * 255 + 0.5)
-    local ig = math.floor((cur_acc[2] or 0.55) * 255 + 0.5)
-    local ib = math.floor((cur_acc[3] or 0.35) * 255 + 0.5)
+    local cur_acc = state.accent_color or { 35 / 255, 35 / 255, 35 / 255 }
+    local ir = math.floor((cur_acc[1] or (35 / 255)) * 255 + 0.5)
+    local ig = math.floor((cur_acc[2] or (35 / 255)) * 255 + 0.5)
+    local ib = math.floor((cur_acc[3] or (35 / 255)) * 255 + 0.5)
     local cur_rgb = ((ir & 0xFF) << 16) | ((ig & 0xFF) << 8) | (ib & 0xFF)
 
     ImGui.SetNextItemWidth(ctx, 180)
@@ -2352,6 +2739,48 @@ function ui.render_tab_general(ctx, state, ImGui)
     ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0x8892B0FF)
     ImGui.Text(ctx, "  Для применения изменений перезагрузите рипер")
     ImGui.PopStyleColor(ctx, 1)
+
+    ImGui.Spacing(ctx)
+    ImGui.Separator(ctx)
+    ImGui.Spacing(ctx)
+
+    render_section_header(ctx, ImGui, "ГОРЯЧИЕ КЛАВИШИ", act_acc)
+
+    ImGui.AlignTextToFramePadding(ctx)
+    ImGui.Text(ctx, "Создать субтитр по Time Selection:")
+    ImGui.SameLine(ctx, 0, 10.0)
+
+    local hotkey_options = { "Shift+T", "T" }
+    local cur_hk = state.hotkey_create_sub or "Shift+T"
+    if cur_hk ~= "Shift+T" and cur_hk ~= "T" then
+      cur_hk = "Shift+T"
+      state.hotkey_create_sub = cur_hk
+    end
+    local cur_hk_idx = 1
+    for idx, opt in ipairs(hotkey_options) do
+      if opt == cur_hk then
+        cur_hk_idx = idx
+        break
+      end
+    end
+
+    ImGui.SetNextItemWidth(ctx, 140)
+    local p_cols, p_vars = push_modern_combo_styles(ctx, ImGui, state)
+    if ImGui.BeginCombo(ctx, "##hotkey_create_sub_combo", cur_hk) then
+      for idx, opt in ipairs(hotkey_options) do
+        local is_sel = (idx == cur_hk_idx)
+        if ImGui.Selectable(ctx, opt, is_sel) then
+          state.hotkey_create_sub = opt
+          state.save_settings()
+        end
+      end
+      ImGui.EndCombo(ctx)
+    end
+    pop_modern_combo_styles(ctx, ImGui, p_cols, p_vars)
+
+    if ImGui.IsItemHovered(ctx) then
+      set_tooltip(ctx, state, ImGui, "Комбинация клавиш для создания субтитра по выделенному Time Selection в проекте.\nЕсли Time Selection не выделен, действие не выполняется.")
+    end
   end
   end_control_box(ctx, ImGui, open_g2)
 
@@ -2389,22 +2818,19 @@ function ui.render_tab_general(ctx, state, ImGui)
   -- Reset UI scale defaults button (Centered modern pill button matching Mockup 3)
   local open_g4 = begin_control_box(ctx, state, ImGui, "gen_card_reset")
   if open_g4 then
-    local avail_w, _ = ImGui.GetContentRegionAvail(ctx)
     local btn_w = 320.0
-    ImGui.SetCursorPosX(ctx, (avail_w - btn_w) * 0.5)
-
-    if render_reset_pill_button(ctx, ImGui, "reset_general_settings", "Сбросить масштабы и акцент по умолчанию", btn_w) then
+    if render_reset_pill_button(ctx, ImGui, "reset_general_settings", "Сбросить масштабы и акцент по умолчанию", btn_w, nil, true) then
       state.ui_font_size = 11.0
       state.popup_font_size = 16.0
       state.tooltip_font_size = 14.0
-      state.accent_color = { 0.16, 0.55, 0.35 }
+      state.accent_color = { 35 / 255, 35 / 255, 35 / 255 }
       state.control_box_palette = 1
       state.watermark_style = 1
       state.save_settings()
     end
 
     if ImGui.IsItemHovered(ctx) then
-      set_tooltip(ctx, state, ImGui, "Возвращает: шрифт интерфейса = 11 px, меню = 16 px, подсказки = 14 px, акцентный цвет = изумруд, палитра = Графит")
+      set_tooltip(ctx, state, ImGui, "Возвращает: шрифт интерфейса = 11 px, меню = 16 px, подсказки = 14 px, акцентный цвет = Черный (35,35,35), палитра = Графит")
     end
   end
   end_control_box(ctx, ImGui, open_g4)
@@ -2414,7 +2840,14 @@ function ui.render_tab_general(ctx, state, ImGui)
   local base_acc, hov_acc, act_acc = get_accent_colors(state, ImGui)
   local avail_w, _ = ImGui.GetContentRegionAvail(ctx)
 
-  -- Line 1: NutNotes version
+  -- Line 1: NutNotes version, Line 2: Author, Line 3: Donate button (scale with ui_font_size)
+  local font_ui = get_or_attach_font(ctx, ImGui, state.text_font_family or "Segoe UI", state.ui_font_size or 11.0)
+  local font_pushed = false
+  if font_ui and ImGui.PushFont then
+    ImGui.PushFont(ctx, font_ui)
+    font_pushed = true
+  end
+
   local ver_text = "NutNotes v" .. (state.version or "0.3.0-beta")
   local w_ver, _ = ImGui.CalcTextSize(ctx, ver_text)
   if w_ver < avail_w then
@@ -2440,26 +2873,18 @@ function ui.render_tab_general(ctx, state, ImGui)
   ImGui.PopStyleColor(ctx, 1)
 
   ImGui.SameLine(ctx, 0, 0)
-  local git_url = "https://github.com/BelkaVBanke/NutNotes" -- Заглушка на git репозиторий
+  local git_url = "https://github.com/BelkaVBanke/NutNotes" -- Ссылка на git репозиторий
 
+  -- Fixed accessible, non-blending link color (GitHub Blue #58A6FF)
+  local link_color = 0x58A6FFFF
   local is_link_hovered = false
-  ImGui.PushStyleColor(ctx, ImGui.Col_Text, base_acc)
+  ImGui.PushStyleColor(ctx, ImGui.Col_Text, link_color)
   ImGui.Text(ctx, link_text)
   if ImGui.IsItemHovered(ctx) then
     is_link_hovered = true
     set_tooltip(ctx, state, ImGui, git_url .. "\n(Нажмите, чтобы открыть в браузере)")
     if ImGui.IsMouseClicked(ctx, 0) then
-      if reaper and reaper.CF_ShellExecute then
-        reaper.CF_ShellExecute(git_url)
-      elseif os and os.execute then
-        local cmd
-        if package.config:sub(1, 1) == "\\" then
-          cmd = string.format('start "" "%s"', git_url)
-        else
-          cmd = string.format('open "%s" 2>/dev/null || xdg-open "%s" 2>/dev/null', git_url, git_url)
-        end
-        os.execute(cmd)
-      end
+      open_url_async(git_url)
     end
   end
   ImGui.PopStyleColor(ctx, 1)
@@ -2469,32 +2894,23 @@ function ui.render_tab_general(ctx, state, ImGui)
     local p_min_x, p_min_y = ImGui.GetItemRectMin(ctx)
     local p_max_x, p_max_y = ImGui.GetItemRectMax(ctx)
     local draw_list = ImGui.GetWindowDrawList(ctx)
-    ImGui.DrawList_AddLine(draw_list, p_min_x, p_max_y, p_max_x, p_max_y, base_acc, 1.0)
+    if draw_list and ImGui.DrawList_AddLine then
+      ImGui.DrawList_AddLine(draw_list, p_min_x, p_max_y, p_max_x, p_max_y, 0x79C0FFFF, 1.0)
+    end
   end
 
   -- Line 3: Кнопка "Поддержать" (DonationAlerts)
   ImGui.Spacing(ctx)
   local donate_url = "https://dalink.to/belkavbanke"
-  local donate_btn_w = 160.0
-  if donate_btn_w < avail_w then
-    ImGui.SetCursorPosX(ctx, (avail_w - donate_btn_w) * 0.5)
-  end
-
-  if render_reset_pill_button(ctx, ImGui, "btn_donate_support", "Поддержать", donate_btn_w) then
-    if reaper and reaper.CF_ShellExecute then
-      reaper.CF_ShellExecute(donate_url)
-    elseif os and os.execute then
-      local cmd
-      if package.config:sub(1, 1) == "\\" then
-        cmd = string.format('start "" "%s"', donate_url)
-      else
-        cmd = string.format('open "%s" 2>/dev/null || xdg-open "%s" 2>/dev/null', donate_url, donate_url)
-      end
-      os.execute(cmd)
-    end
+  if render_reset_pill_button(ctx, ImGui, "btn_donate_support", "Поддержать", 160.0, nil, true) then
+    open_url_async(donate_url)
   end
   if ImGui.IsItemHovered(ctx) then
     set_tooltip(ctx, state, ImGui, donate_url .. "\n(Поддержать автора на DonationAlerts)")
+  end
+
+  if font_pushed and ImGui.PopFont then
+    ImGui.PopFont(ctx)
   end
 
   ImGui.Spacing(ctx)
@@ -2578,6 +2994,66 @@ function ui.render_replace_modal(ctx, state, ImGui)
     if state.pending_filepath and not state.show_replace_modal then
       state.pending_filepath = nil
     end
+  end
+  pop_modern_popup_styles(ctx, ImGui, pop_c, pop_v)
+end
+
+-- Render Modal Dialog: Missing js_ReaScriptAPI Extension Notification
+function ui.render_missing_js_modal(ctx, state, ImGui)
+  if state.show_missing_js_modal then
+    ImGui.OpenPopup(ctx, "Требуется расширение###MISSING_JS_MODAL")
+    state.show_missing_js_modal = false
+  end
+
+  local pop_c, pop_v = push_modern_popup_styles(ctx, ImGui, state)
+  if ImGui.BeginPopupModal(ctx, "Требуется расширение###MISSING_JS_MODAL", nil, ImGui.WindowFlags_AlwaysAutoResize) then
+    local popup_font = get_or_attach_font(ctx, ImGui, state.text_font_family, state.popup_font_size or 16.0)
+    local popup_font_pushed = false
+    if popup_font and ImGui.PushFont then
+      ImGui.PushFont(ctx, popup_font)
+      popup_font_pushed = true
+    end
+
+    local base_acc, hov_acc, act_acc = get_accent_colors(state, ImGui)
+
+    render_section_header(ctx, ImGui, "ЭКСПОРТ ФАЙЛОВ", act_acc)
+
+    ImGui.Text(ctx, "Для экспорта файлов необходимо расширение:")
+    ImGui.Spacing(ctx)
+
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, act_acc)
+    ImGui.Text(ctx, "js_ReaScriptAPI: API functions for ReaScripts")
+    ImGui.PopStyleColor(ctx, 1)
+
+    ImGui.Spacing(ctx)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0x94A3B8FF)
+    ImGui.Text(ctx, "Установите его в REAPER через меню:\nExtensions -> ReaPack -> Browse packages...")
+    ImGui.PopStyleColor(ctx, 1)
+
+    ImGui.Spacing(ctx)
+    ImGui.Separator(ctx)
+    ImGui.Spacing(ctx)
+
+    local btn_w = 120.0
+    local btn_h = 28.0
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_FrameRounding, btn_h * 0.5)
+
+    -- Primary Button: "Понятно"
+    ImGui.PushStyleColor(ctx, ImGui.Col_Button, base_acc)
+    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, hov_acc)
+    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, act_acc)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0xFFFFFFFF)
+    if ImGui.Button(ctx, "Понятно", btn_w, btn_h) or (ImGui.Key_Escape and ImGui.IsKeyPressed(ctx, ImGui.Key_Escape)) or (ImGui.Key_Enter and ImGui.IsKeyPressed(ctx, ImGui.Key_Enter)) then
+      ImGui.CloseCurrentPopup(ctx)
+      actions.return_focus_to_reaper()
+    end
+    ImGui.PopStyleColor(ctx, 4)
+    ImGui.PopStyleVar(ctx, 1)
+
+    if popup_font_pushed then
+      ImGui.PopFont(ctx)
+    end
+    ImGui.EndPopup(ctx)
   end
   pop_modern_popup_styles(ctx, ImGui, pop_c, pop_v)
 end
@@ -2941,9 +3417,15 @@ end
 -- Render Dedicated Subtitle Text Edit Modal (Right-Click Menu -> Изменить текст)
 function ui.render_text_edit_modal(ctx, state, ImGui)
   if state.open_text_edit_popup then
+    if ImGui.SetNextWindowFocus then
+      ImGui.SetNextWindowFocus(ctx)
+    end
     ImGui.OpenPopup(ctx, "Изменить текст субтитра###SUB_TEXT_EDIT_MODAL")
     state.open_text_edit_popup = false
     state.text_edit_focused = false
+    if actions.focus_nutnotes_window then
+      actions.focus_nutnotes_window()
+    end
   end
 
   local pop_c, pop_v = push_modern_popup_styles(ctx, ImGui, state)
@@ -2951,7 +3433,13 @@ function ui.render_text_edit_modal(ctx, state, ImGui)
   if ImGui.WindowFlags_NoTitleBar then
     modal_flags = modal_flags | ImGui.WindowFlags_NoTitleBar
   end
+  if ImGui.SetNextWindowFocus then
+    ImGui.SetNextWindowFocus(ctx)
+  end
   if ImGui.BeginPopupModal(ctx, "Изменить текст субтитра###SUB_TEXT_EDIT_MODAL", nil, modal_flags) then
+    if ImGui.SetNextFrameWantCaptureKeyboard then
+      ImGui.SetNextFrameWantCaptureKeyboard(ctx, true)
+    end
     local popup_font = get_or_attach_font(ctx, ImGui, state.text_font_family, state.popup_font_size or 16.0)
     local popup_font_pushed = false
     if popup_font and ImGui.PushFont then
@@ -3082,25 +3570,57 @@ function ui.render_text_edit_modal(ctx, state, ImGui)
       -- Footer matching HTML mockup with Ctrl+Enter tooltip on Save button
       local save_pressed, cancel_pressed = render_modal_footer(ctx, state, ImGui, act_acc, base_acc, hov_acc, modal_w, "Сохранить", true, false, "Сохранить (Ctrl+Enter)")
 
-      -- Check Ctrl+Enter
-      local ctrl_down = (ImGui.Mod_Ctrl and ImGui.IsKeyDown(ctx, ImGui.Mod_Ctrl))
-                     or (ImGui.Key_LeftCtrl and ImGui.IsKeyDown(ctx, ImGui.Key_LeftCtrl))
-                     or (ImGui.Key_RightCtrl and ImGui.IsKeyDown(ctx, ImGui.Key_RightCtrl))
-      local enter_pressed = ImGui.Key_Enter and ImGui.IsKeyPressed(ctx, ImGui.Key_Enter)
+      -- Check Ctrl+Enter / Cmd+Enter across all versions
+      local ctrl_down = false
+      if reaper and reaper.JS_Mouse_GetState then
+        local ok, mc = pcall(reaper.JS_Mouse_GetState, 0x1C)
+        if ok and mc and (mc & 4) ~= 0 then ctrl_down = true end
+      end
+      if not ctrl_down and ImGui.IsKeyDown then
+        local keys = { ImGui.Key_LeftCtrl, ImGui.Key_RightCtrl, ImGui.Mod_Ctrl, ImGui.Key_LeftSuper, ImGui.Key_RightSuper, ImGui.Mod_Super }
+        for _, k in ipairs(keys) do
+          if k then
+            local ok, down = pcall(ImGui.IsKeyDown, ctx, k)
+            if ok and down then
+              ctrl_down = true
+              break
+            end
+          end
+        end
+      end
+
+      local enter_pressed = false
+      if ImGui.Key_Enter then
+        local ok, p = pcall(ImGui.IsKeyPressed, ctx, ImGui.Key_Enter)
+        if ok and p then enter_pressed = true end
+      end
+      if not enter_pressed and ImGui.Key_KeypadEnter then
+        local ok, p = pcall(ImGui.IsKeyPressed, ctx, ImGui.Key_KeypadEnter)
+        if ok and p then enter_pressed = true end
+      end
+
       if ctrl_down and enter_pressed then
         save_pressed = true
       end
 
       if save_pressed then
-        state.push_undo("Изменение текста строки #" .. idx)
-        sub.text = parser.strip_invisible_unicode(state.text_edit_content or "")
-        state.row_heights = {}
-        state.save_to_project()
-        actions.update_subtitle_timeline(state, idx)
-        actions.sync_filter_to_timeline(state)
+        local new_text = parser.strip_invisible_unicode(state.text_edit_content or "")
+        if new_text ~= (sub.text or "") then
+          local old_snap = state.capture_snapshot and state.capture_snapshot("Изменение текста строки #" .. idx)
+          sub.text = new_text
+          state.row_heights = {}
+          state.save_to_project()
+          if state.push_undo then
+            state.push_undo("Изменение текста строки #" .. idx, old_snap, function()
+              actions.update_subtitle_timeline(state, idx)
+              actions.sync_filter_to_timeline(state)
+            end)
+          end
+        end
         state.text_edit_idx = nil
         state.text_edit_content = nil
         state.text_edit_focused = false
+        state._is_creating_new_sub = nil
         ImGui.CloseCurrentPopup(ctx)
         actions.return_focus_to_reaper()
       end
@@ -3109,6 +3629,7 @@ function ui.render_text_edit_modal(ctx, state, ImGui)
         state.text_edit_idx = nil
         state.text_edit_content = nil
         state.text_edit_focused = false
+        state._is_creating_new_sub = nil
         ImGui.CloseCurrentPopup(ctx)
         actions.return_focus_to_reaper()
       end
@@ -3120,6 +3641,7 @@ function ui.render_text_edit_modal(ctx, state, ImGui)
         state.text_edit_idx = nil
         state.text_edit_content = nil
         state.text_edit_focused = false
+        state._is_creating_new_sub = nil
         ImGui.CloseCurrentPopup(ctx)
         actions.return_focus_to_reaper()
       end
@@ -3135,6 +3657,7 @@ function ui.render_text_edit_modal(ctx, state, ImGui)
       state.text_edit_idx = nil
       state.text_edit_content = nil
       state.text_edit_focused = false
+      state._is_creating_new_sub = nil
       actions.return_focus_to_reaper()
     end
   end
@@ -3145,18 +3668,6 @@ end
 function ui.draw(ctx, state, ImGui)
   -- Check if project changed in REAPER (tab switch)
   state.check_project_changed()
-
-  -- Handle Ctrl+Z Undo when inside plugin window and not actively typing in an input field
-  local ctrl_down = (ImGui.Mod_Ctrl and ImGui.IsKeyDown(ctx, ImGui.Mod_Ctrl))
-                 or (ImGui.Key_LeftCtrl and ImGui.IsKeyDown(ctx, ImGui.Key_LeftCtrl))
-                 or (ImGui.Key_RightCtrl and ImGui.IsKeyDown(ctx, ImGui.Key_RightCtrl))
-  local z_pressed = ImGui.Key_Z and ImGui.IsKeyPressed(ctx, ImGui.Key_Z)
-  if ctrl_down and z_pressed and not ImGui.IsAnyItemActive(ctx) then
-    if state.undo() then
-      actions.sync_filter_to_timeline(state)
-      actions.init_timeline_sync(state)
-    end
-  end
 
   local win_flags = ImGui.WindowFlags_MenuBar or 0
   if ImGui.WindowFlags_NoNavInputs then
@@ -3169,6 +3680,119 @@ function ui.draw(ctx, state, ImGui)
   local visible, open = ImGui.Begin(ctx, "NutNotes###MAIN_NUTNOTES_WINDOW", true, win_flags)
 
   if visible then
+    local win_focused = (ImGui.IsWindowFocused and ImGui.IsWindowFocused(ctx, ImGui.FocusedFlags_RootAndChildWindows or 0))
+    local is_reaper_playing = reaper and ((reaper.GetPlayState() & 1) ~= 0)
+    local is_typing = actions.is_text_editing_active(ctx, state, ImGui)
+
+    -- Instruct ReaImGui whether to capture keyboard shortcuts from REAPER's global scope
+    if ImGui.SetNextFrameWantCaptureKeyboard then
+      ImGui.SetNextFrameWantCaptureKeyboard(ctx, is_typing)
+    end
+
+    -- HOTKEYS (Processed natively when NutNotes window or any child window is focused)
+    if win_focused then
+      -- 1. Ctrl+R: Transport Record Passthrough
+      if not is_typing and ImGui.Key_R and ImGui.IsKeyPressed(ctx, ImGui.Key_R) then
+        local ctrl_down = (ImGui.IsKeyDown(ctx, ImGui.Mod_Ctrl) or ImGui.IsKeyDown(ctx, ImGui.Key_LeftCtrl) or ImGui.IsKeyDown(ctx, ImGui.Key_RightCtrl))
+        local shift_down = (ImGui.IsKeyDown(ctx, ImGui.Mod_Shift) or ImGui.IsKeyDown(ctx, ImGui.Key_LeftShift) or ImGui.IsKeyDown(ctx, ImGui.Key_RightShift))
+        local alt_down = (ImGui.IsKeyDown(ctx, ImGui.Mod_Alt) or ImGui.IsKeyDown(ctx, ImGui.Key_LeftAlt) or ImGui.IsKeyDown(ctx, ImGui.Key_RightAlt))
+        if ctrl_down and not shift_down and not alt_down then
+          if reaper and reaper.Main_OnCommand then
+            reaper.Main_OnCommand(1013, 0) -- Transport: Record
+          end
+        end
+      end
+
+      -- 2. Space Passthrough: Play/Stop REAPER playback if not typing in an input field
+      if not is_typing and ImGui.IsKeyPressed(ctx, ImGui.Key_Space) then
+        if reaper and reaper.Main_OnCommand then
+          reaper.Main_OnCommand(40044, 0) -- Transport: Play/stop
+        end
+      end
+
+      -- 3. Delete / Backspace: Delete selected subtitle when stopped and not typing
+      if not is_typing and not is_reaper_playing then
+        local del_pressed = ImGui.IsKeyPressed(ctx, ImGui.Key_Delete)
+        if not del_pressed and ImGui.IsKeyPressed(ctx, ImGui.Key_Backspace) then
+          local ctrl_down = (ImGui.IsKeyDown(ctx, ImGui.Mod_Ctrl) or ImGui.IsKeyDown(ctx, ImGui.Key_LeftCtrl) or ImGui.IsKeyDown(ctx, ImGui.Key_RightCtrl))
+          if not ctrl_down then del_pressed = true end
+        end
+        if del_pressed then
+          local real_idx = state.user_selected_row_idx
+          if real_idx and state.subtitles[real_idx] then
+            state.delete_subtitle(real_idx)
+            actions.sync_filter_to_timeline(state)
+            actions.init_timeline_sync(state)
+            state.user_selected_row_idx = nil
+          else
+            -- If no subtitle row is explicitly selected in NutNotes, pass Delete through to REAPER!
+            if reaper and reaper.Main_OnCommand then
+              reaper.Main_OnCommand(40697, 0) -- Item: Remove items/tracks/env points (depending on focus)
+            end
+          end
+        end
+      end
+
+      -- 4. Ctrl+Z / Cmd+Z: Internal Plugin Undo, Ctrl+Shift+Z: Redo
+      if not is_typing then
+        local ctrl_down = ImGui.IsKeyDown(ctx, ImGui.Mod_Ctrl)
+                       or ImGui.IsKeyDown(ctx, ImGui.Key_LeftCtrl)
+                       or ImGui.IsKeyDown(ctx, ImGui.Key_RightCtrl)
+                       or ImGui.IsKeyDown(ctx, ImGui.Mod_Super)
+                       or ImGui.IsKeyDown(ctx, ImGui.Key_LeftSuper)
+                       or ImGui.IsKeyDown(ctx, ImGui.Key_RightSuper)
+        local shift_down = ImGui.IsKeyDown(ctx, ImGui.Mod_Shift)
+                        or ImGui.IsKeyDown(ctx, ImGui.Key_LeftShift)
+                        or ImGui.IsKeyDown(ctx, ImGui.Key_RightShift)
+        local z_pressed = ImGui.IsKeyPressed(ctx, ImGui.Key_Z)
+        if ctrl_down and not shift_down and z_pressed then
+          if state.undo(actions) then
+            actions.sync_filter_to_timeline(state)
+            actions.init_timeline_sync(state)
+          else
+            if reaper and reaper.Main_OnCommand then
+              reaper.Main_OnCommand(40029, 0) -- Edit: Undo
+            end
+          end
+        elseif ctrl_down and shift_down and z_pressed then
+          if state.redo(actions) then
+            actions.sync_filter_to_timeline(state)
+            actions.init_timeline_sync(state)
+          else
+            if reaper and reaper.Main_OnCommand then
+              reaper.Main_OnCommand(40030, 0) -- Edit: Redo
+            end
+          end
+        end
+      end
+
+      -- 5. Hotkey (Shift+T or T): Create subtitle from REAPER time selection
+      if not is_typing then
+        local shift_down = ImGui.IsKeyDown(ctx, ImGui.Mod_Shift)
+                        or ImGui.IsKeyDown(ctx, ImGui.Key_LeftShift)
+                        or ImGui.IsKeyDown(ctx, ImGui.Key_RightShift)
+        local ctrl_down = ImGui.IsKeyDown(ctx, ImGui.Mod_Ctrl)
+                       or ImGui.IsKeyDown(ctx, ImGui.Key_LeftCtrl)
+                       or ImGui.IsKeyDown(ctx, ImGui.Key_RightCtrl)
+        local alt_down  = ImGui.IsKeyDown(ctx, ImGui.Mod_Alt)
+                       or ImGui.IsKeyDown(ctx, ImGui.Key_LeftAlt)
+                       or ImGui.IsKeyDown(ctx, ImGui.Key_RightAlt)
+        local t_pressed = ImGui.IsKeyPressed(ctx, ImGui.Key_T)
+
+        local target_hk = state.hotkey_create_sub or "Shift+T"
+        local match = false
+        if target_hk == "Shift+T" then
+          match = shift_down and not ctrl_down and not alt_down and t_pressed
+        elseif target_hk == "T" then
+          match = not shift_down and not ctrl_down and not alt_down and t_pressed
+        end
+
+        if match then
+          actions.create_subtitle_from_time_selection(state)
+        end
+      end
+    end
+
     local frame_bg_pushed = 0
     frame_bg_pushed = frame_bg_pushed + safe_push_style_color(ctx, ImGui, ImGui.Col_FrameBg, 0x2A313EFF)
     frame_bg_pushed = frame_bg_pushed + safe_push_style_color(ctx, ImGui, ImGui.Col_FrameBgHovered, 0x3E4554FF)
@@ -3261,6 +3885,66 @@ function ui.draw(ctx, state, ImGui)
       ImGui.PopStyleColor(ctx, 4)
       ui.handle_file_drop(ctx, state, ImGui)
 
+      ImGui.SameLine(ctx, 0, 8.0)
+
+      -- Button: Export to .ass in Row 1 (Styled identically to Load File with user accent color)
+      ImGui.PushStyleColor(ctx, ImGui.Col_Button, base_acc)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, hov_acc)
+      ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, act_acc)
+      ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0xFFFFFFFF)
+      if ImGui.Button(ctx, "💾 Экспорт в .ass") then
+        local default_fn = "subtitles.ass"
+        if state.filename and #state.filename > 0 then
+          default_fn = state.filename:gsub("%.[^%.]+$", "") .. ".ass"
+        end
+
+        local initial_dir = ""
+        if state.filepath and #state.filepath > 0 then
+          initial_dir = state.filepath:match("^(.*)[/\\]") or ""
+        end
+        if (not initial_dir or #initial_dir == 0) and reaper and reaper.GetProjectPath then
+          local prj_dir = reaper.GetProjectPath("")
+          if prj_dir and #prj_dir > 0 then
+            initial_dir = prj_dir
+          end
+        end
+
+        local out_path = nil
+        -- Use JS_Dialog_BrowseForSaveFile if available
+        if reaper and reaper.JS_Dialog_BrowseForSaveFile then
+          local ok_js, rv, chosen = pcall(reaper.JS_Dialog_BrowseForSaveFile, "Сохранить субтитры как .ass", initial_dir or "", default_fn, "ASS Subtitles (*.ass)\0*.ass;*.ASS\0All files (*.*)\0*.*\0\0")
+          if ok_js and rv and rv > 0 and chosen and #chosen > 0 then
+            out_path = chosen
+          end
+          -- On cancel/failure, do nothing (never invoke default REAPER modal dialog)
+        else
+          -- Extension not installed: show missing extension notification modal
+          state.show_missing_js_modal = true
+        end
+
+        if out_path and #out_path > 0 then
+          out_path = out_path:gsub("\\", "/")
+          if not out_path:lower():match("%.ass$") then
+            out_path = out_path .. ".ass"
+          end
+          local subs_to_export = (state.sync_with_filter and state.get_filtered_subtitles()) or state.subtitles
+          local ok_exp, err_msg = parser.export_to_ass(out_path, subs_to_export, state)
+          if ok_exp and reaper and reaper.MB then
+            reaper.MB(string.format("Субтитры успешно экспортированы (%d строк):\n%s", #subs_to_export, out_path), "Экспорт завершен", 0)
+          elseif not ok_exp and reaper and reaper.MB then
+            reaper.MB("Ошибка при экспорте субтитров:\n" .. tostring(err_msg), "Ошибка экспорта", 0)
+          end
+        end
+      end
+      ImGui.PopStyleColor(ctx, 4)
+      if ImGui.IsItemHovered(ctx) then
+        if not (reaper and reaper.JS_Dialog_BrowseForSaveFile) then
+          set_tooltip(ctx, state, ImGui, "Для экспорта файлов необходимо расширение:\njs_ReaScriptAPI: API functions for ReaScripts\n(установите через Extensions -> ReaPack -> Browse packages...)")
+        else
+          set_tooltip(ctx, state, ImGui, "Экспортирует текущий список субтитров в файл формата Advanced SubStation Alpha (.ass)")
+        end
+      end
+
       -- Align open lock button to top-right corner of Row 1
       if ImGui.GetCursorPosX(ctx) < lock_target_x then
         ImGui.SameLine(ctx, lock_target_x)
@@ -3286,9 +3970,9 @@ function ui.draw(ctx, state, ImGui)
       ImGui.Spacing(ctx)
       local row2_avail_w, _ = ImGui.GetContentRegionAvail(ctx)
 
-      if state.filename and #state.subtitles > 0 then
-        local label_prefix = "Загруженный файл: "
-        local fmt_badge = string.format("[%s]", state.format or "SUB")
+      if #state.subtitles > 0 then
+        local label_prefix = (state.filename and #state.filename > 0) and "Загруженный файл: " or "Субтитры: "
+        local fmt_badge = (state.filename and #state.filename > 0) and string.format("[%s]", state.format or "SUB") or "[ПРОЕКТ]"
         local lines_count_str = string.format("(%d строк)", #state.subtitles)
         local clear_btn_label = "✕ Очистить"
         local clear_btn_txt_w, _ = ImGui.CalcTextSize(ctx, clear_btn_label)
@@ -3302,7 +3986,7 @@ function ui.draw(ctx, state, ImGui)
 
         -- Available width specifically for the filename
         local max_name_w = math.max(60.0, row2_avail_w - fixed_total_w)
-        local full_name = state.filename or ""
+        local full_name = (state.filename and #state.filename > 0) and state.filename or "Субтитры проекта"
         local disp_name = full_name
 
         -- If full filename doesn't fit, truncate it with ellipsis without cutting off lines count or clear button
@@ -3361,19 +4045,33 @@ function ui.draw(ctx, state, ImGui)
         ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, 0x991B1BCC)
         ImGui.PushStyleColor(ctx, ImGui.Col_Text, 0xE2E8F0FF)
         if ImGui.Button(ctx, clear_btn_label, clear_btn_w, 0) then
+          local old_snap = state.capture_snapshot and state.capture_snapshot("Очистить все субтитры")
           state.filepath = nil
           state.filename = nil
+          state.format = nil
           state.subtitles = {}
           state.actors = {}
+          state.actor_counts = {}
           state.actor_palette = {}
           state.selected_actors = {}
+          state.selected_real_sub_idx = nil
+          state.active_sub_idx = nil
           state.refresh_filter_set()
+          actions.clear_regions()
+          actions.clear_subtitle_track()
+          actions.init_timeline_sync(state)
+          if state.push_undo then
+            state.push_undo("Очистить все субтитры", old_snap)
+          end
           state.save_to_project()
         end
         ImGui.PopStyleColor(ctx, 4)
+        if ImGui.IsItemHovered(ctx) then
+          set_tooltip(ctx, state, ImGui, "Очистить все субтитры из плагина и с таймлайна (Undoable / Ctrl+Z)")
+        end
       else
         ImGui.AlignTextToFramePadding(ctx)
-        ImGui.TextDisabled(ctx, "Файл не загружен. Перетащите .ass / .srt в это окно.")
+        ImGui.TextDisabled(ctx, "Файл не загружен. Перетащите .ass / .srt в это окно или нажмите Shift+T.")
         ui.handle_file_drop(ctx, state, ImGui)
       end
 
@@ -3421,6 +4119,11 @@ function ui.draw(ctx, state, ImGui)
         -- Invisible button covering the tab area for interaction (no hover visual change)
         if ImGui.InvisibleButton(ctx, "###tab_nav_" .. tab.id, tab_w, tab_h) then
           state.active_tab = tab.id
+          if tab.id == "TAB_SUBS" then
+            state.last_centered_idx = -1
+            state.need_calc_scroll_target = true
+            state.suppress_autoscroll_until = 0
+          end
           state.save_settings()
         end
 
@@ -3478,6 +4181,7 @@ function ui.draw(ctx, state, ImGui)
 
     -- Modals
     ui.render_replace_modal(ctx, state, ImGui)
+    ui.render_missing_js_modal(ctx, state, ImGui)
     ui.render_text_edit_modal(ctx, state, ImGui)
     ui.render_sub_actor_modal(ctx, state, ImGui)
     ui.render_rename_actor_modal(ctx, state, ImGui)
@@ -3485,9 +4189,9 @@ function ui.draw(ctx, state, ImGui)
     if frame_bg_pushed > 0 then
       ImGui.PopStyleColor(ctx, frame_bg_pushed)
     end
-
-    ImGui.End(ctx)
   end
+
+  ImGui.End(ctx)
 
   is_frame_active = false
 

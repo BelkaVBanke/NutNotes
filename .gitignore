@@ -4,8 +4,6 @@
 
 # Сборки и релизные артефакты
 build/
-release/
-installer/Output/
 dist/
 
 examples/

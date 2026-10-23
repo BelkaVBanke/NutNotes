@@ -3,8 +3,8 @@
 """
 NutNotes Full Rebuild Pipeline:
   1. Synchronize version in all project files (VERSION, NutNotes.lua, modules/state.lua, Inno Setup)
-  2. Build clean release ZIP archive (build/NutNotes_v<ver>.zip)
-  3. Compile Inno Setup offline installer (installer/Output/NutNotes_Setup_v<ver>.exe)
+  2. Build clean cross-platform release ZIP archive (build/v<ver>/NutNotes_v<ver>.zip)
+  3. Compile Inno Setup offline installer (build/v<ver>/NutNotes_Setup_v<ver>.exe)
 """
 
 import os
@@ -20,7 +20,7 @@ def get_current_version() -> str:
         v = VERSION_FILE.read_text(encoding="utf-8").strip()
         if v:
             return v
-    return "0.3.0-beta"
+    return "0.3.1-beta"
 
 def run_command(cmd, desc):
     print("\n" + "=" * 65)
@@ -57,10 +57,10 @@ def main():
         f"[ШАГ 1/3] Синхронизация версий во всех файлах проекта ({target_ver})"
     )
 
-    # Step 2: Build release ZIP
+    # Step 2: Build cross-platform release ZIP
     run_command(
         [sys.executable, str(ROOT_DIR / "tools" / "build_release.py"), target_ver],
-        f"[ШАГ 2/3] Сборка релизного ZIP-архива NutNotes_v{target_ver}.zip"
+        f"[ШАГ 2/3] Сборка кроссплатформенного ZIP-архива NutNotes_v{target_ver}.zip"
     )
 
     # Step 3: Build Inno Setup installer
@@ -73,8 +73,9 @@ def main():
     print("                   РЕБИЛД УСПЕШНО ЗАВЕРШЕН!")
     print("=" * 65)
     print(f" Версия:     {target_ver}")
-    print(f" ZIP-архив:  build/NutNotes_v{target_ver}.zip")
-    print(f" Установщик: installer/Output/NutNotes_Setup_v{target_ver}.exe")
+    print(f" Релизы в:   build/v{target_ver}/")
+    print(f"  ├── ZIP:   build/v{target_ver}/NutNotes_v{target_ver}.zip")
+    print(f"  └── EXE:   build/v{target_ver}/NutNotes_Setup_v{target_ver}.exe")
     print("=" * 65 + "\n")
 
 if __name__ == "__main__":

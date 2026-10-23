@@ -77,8 +77,7 @@ function actions.clear_subtitle_track()
   local tr = actions.find_subtitle_track()
   if not tr then return 0 end
 
-  reaper.Undo_BeginBlock()
-  reaper.PreventUIRefresh(1)
+  if reaper.PreventUIRefresh then reaper.PreventUIRefresh(1) end
 
   local item_count = reaper.CountTrackMediaItems(tr)
   local count_removed = 0
@@ -90,9 +89,8 @@ function actions.clear_subtitle_track()
     end
   end
 
-  reaper.PreventUIRefresh(-1)
-  reaper.UpdateArrange()
-  reaper.Undo_EndBlock("Clear Subtitle Track Items (" .. count_removed .. ")", -1)
+  if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
+  if reaper.UpdateArrange then reaper.UpdateArrange() end
 
   return count_removed
 end
@@ -101,13 +99,11 @@ end
 function actions.create_items(subtitles, palette, state)
   if not reaper or not subtitles or #subtitles == 0 then return 0 end
 
-  if reaper.Undo_BeginBlock then reaper.Undo_BeginBlock() end
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(1) end
 
   local track = actions.get_or_create_subtitle_track()
   if not track then
     if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
-    if reaper.Undo_EndBlock then reaper.Undo_EndBlock("Create Subtitle Items", -1) end
     return 0
   end
 
@@ -159,7 +155,6 @@ function actions.create_items(subtitles, palette, state)
 
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
   if reaper.UpdateArrange then reaper.UpdateArrange() end
-  if reaper.Undo_EndBlock then reaper.Undo_EndBlock("Create Subtitle Items (" .. count_created .. ")", -1) end
 
   if state and actions.init_timeline_sync then
     actions.init_timeline_sync(state)
@@ -186,16 +181,36 @@ function actions.clear_regions()
   return count_deleted
 end
 
--- Clear all plugin regions with dedicated Undo point
+-- Check if there are any active NutNotes plugin regions in project
+function actions.has_plugin_regions()
+  if not reaper or not reaper.CountProjectMarkers or not reaper.EnumProjectMarkers3 then return false end
+  local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
+  for i = 0, (num_markers + num_regions) - 1 do
+    local retval, isrgn, pos, rgnend, name = reaper.EnumProjectMarkers3(0, i)
+    if retval > 0 and isrgn and actions.is_plugin_region(name) then
+      return true
+    end
+  end
+  return false
+end
+
+-- Check if there are any items on subtitle track
+function actions.has_track_items()
+  local tr = actions.find_subtitle_track()
+  if tr and reaper and reaper.CountTrackMediaItems then
+    return reaper.CountTrackMediaItems(tr) > 0
+  end
+  return false
+end
+
+-- Clear all plugin regions
 function actions.clear_regions_with_undo()
   if not reaper then return 0 end
 
-  if reaper.Undo_BeginBlock then reaper.Undo_BeginBlock() end
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(1) end
   local count = actions.clear_regions()
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
   if reaper.UpdateTimeline then reaper.UpdateTimeline() end
-  if reaper.Undo_EndBlock then reaper.Undo_EndBlock("Clear Subtitle Regions (" .. count .. ")", -1) end
   return count
 end
 
@@ -203,7 +218,6 @@ end
 function actions.set_regions(subtitles, palette, state)
   if not reaper or not subtitles or not reaper.AddProjectMarker2 then return 0 end
 
-  if reaper.Undo_BeginBlock then reaper.Undo_BeginBlock() end
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(1) end
 
   -- Delete only NutNotes plugin regions (user markers and regions stay untouched)
@@ -238,7 +252,6 @@ function actions.set_regions(subtitles, palette, state)
 
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
   if reaper.UpdateTimeline then reaper.UpdateTimeline() end
-  if reaper.Undo_EndBlock then reaper.Undo_EndBlock("Set Subtitle Regions (" .. count_created .. ")", -1) end
 
   if state and actions.init_timeline_sync then
     actions.init_timeline_sync(state)
@@ -396,7 +409,7 @@ function actions.ensure_toolbar_icons()
   return false
 end
 
--- Ensure NutNotes action is registered in reaper-kb.ini so REAPER can invoke it by action ID
+-- Ensure NutNotes actions are registered in reaper-kb.ini so REAPER can invoke them by action ID
 -- Returns the action command ID string (e.g. "_RS458e8fd72200237182e91979ee7b7dd971227cf5" or "_RS_NUTNOTES_LAUNCHER")
 function actions.ensure_action_registered()
   if not reaper or not reaper.GetResourcePath then return "_RS_NUTNOTES_LAUNCHER" end
@@ -405,6 +418,7 @@ function actions.ensure_action_registered()
 
   local f = io.open(kb_file, "r")
   local found_cmd = nil
+  local found_create_sub = false
   if f then
     for line in f:lines() do
       if line:match("^SCR%s+") and line:find("NutNotes.lua", 1, true) then
@@ -412,44 +426,34 @@ function actions.ensure_action_registered()
         for p in line:gmatch("%S+") do table.insert(parts, p) end
         if parts[4] and parts[4]:match("^RS") then
           found_cmd = "_" .. parts[4]
-          break
         elseif parts[4] and parts[4]:match("^_RS") then
           found_cmd = parts[4]
-          break
         end
+      elseif line:match("^SCR%s+") and line:find("NutNotes_CreateSubtitle.lua", 1, true) then
+        found_create_sub = true
       end
     end
     f:close()
   end
 
-  if found_cmd then
-    return found_cmd
+  local lines_to_append = ""
+  if not found_cmd then
+    lines_to_append = lines_to_append .. '\nSCR 4 0 _RS_NUTNOTES_LAUNCHER "Script: NutNotes.lua" "NutNotes/NutNotes.lua"'
+    found_cmd = "_RS_NUTNOTES_LAUNCHER"
+  end
+  if not found_create_sub then
+    lines_to_append = lines_to_append .. '\nSCR 4 0 _RS_NUTNOTES_CREATE_SUBTITLE "Script: NutNotes_CreateSubtitle.lua" "NutNotes/NutNotes_CreateSubtitle.lua"'
   end
 
-  -- Detect relative script path inside REAPER
-  local script_rel_path = "NutNotes/NutNotes.lua"
-  local check_paths = {
-    { full = res_path .. "/Scripts/NutNotes/NutNotes.lua", rel = "NutNotes/NutNotes.lua" },
-    { full = res_path .. "/Scripts/MyScripts/NutNotes.lua", rel = "MyScripts/NutNotes.lua" },
-    { full = res_path .. "/Scripts/NutNotes.lua", rel = "NutNotes.lua" },
-  }
-  for _, cp in ipairs(check_paths) do
-    local tf = io.open(cp.full, "r")
-    if tf then
-      tf:close()
-      script_rel_path = cp.rel
-      break
+  if #lines_to_append > 0 then
+    local f_out = io.open(kb_file, "a")
+    if f_out then
+      f_out:write(lines_to_append .. "\n")
+      f_out:close()
     end
   end
 
-  local line = string.format('\nSCR 4 0 _RS_NUTNOTES_LAUNCHER "Script: NutNotes.lua" "%s"\n', script_rel_path)
-  local f_out = io.open(kb_file, "a")
-  if f_out then
-    f_out:write(line)
-    f_out:close()
-    return "_RS_NUTNOTES_LAUNCHER"
-  end
-  return "_RS_NUTNOTES_LAUNCHER"
+  return found_cmd
 end
 
 -- Check if NutNotes launcher button is present on the Main toolbar or Toolbar 1 in reaper-menu.ini
@@ -674,9 +678,27 @@ function actions.return_focus_to_reaper()
   end
 end
 
+-- Bring NutNotes window into foreground and set keyboard focus
+function actions.focus_nutnotes_window()
+  if not reaper then return end
+  if reaper.JS_Window_FindTop and reaper.JS_Window_SetFocus then
+    local wnd = reaper.JS_Window_FindTop("NutNotes", false)
+    if not wnd and reaper.JS_Window_Find then
+      wnd = reaper.JS_Window_Find("NutNotes", false)
+    end
+    if wnd then
+      if reaper.JS_Window_SetForeground then
+        pcall(reaper.JS_Window_SetForeground, wnd)
+      end
+      pcall(reaper.JS_Window_SetFocus, wnd)
+    end
+  end
+end
+
 -- Check if any popup is open in ReaImGui
 function actions.is_popup_open(ctx, ImGui)
   if not ctx or not ImGui or not ImGui.IsPopupOpen then return false end
+  if ImGui.ValidatePtr and not ImGui.ValidatePtr(ctx, 'ImGui_Context*') then return false end
   local any_flags = 0
   if ImGui.PopupFlags_AnyPopupId then any_flags = any_flags | ImGui.PopupFlags_AnyPopupId end
   if ImGui.PopupFlags_AnyPopupLevel then any_flags = any_flags | ImGui.PopupFlags_AnyPopupLevel end
@@ -690,18 +712,34 @@ function actions.is_text_editing_active(ctx, state, ImGui)
   if not state then return false end
   if state.open_text_edit_popup then return true end
   if state.editing_idx ~= nil then return true end
-  if state.text_edit_idx ~= nil and state.text_edit_focused then return true end
+  if state.text_edit_idx ~= nil then return true end
   if state.open_sub_actor_modal or state.sub_actor_modal_idx ~= nil then return true end
   if state.open_rename_actor_modal or (state.rename_actor_orig and state.rename_actor_orig ~= "") then return true end
-  if ctx and ImGui and ImGui.IsPopupOpen then
-    if ImGui.IsPopupOpen(ctx, "Изменить текст субтитра###SUB_TEXT_EDIT_MODAL") then return true end
-    if ImGui.IsPopupOpen(ctx, "Изменить актера субтитра###SUB_ACTOR_EDIT_MODAL") then return true end
-    if ImGui.IsPopupOpen(ctx, "Переименовать актера###RENAME_ACTOR_MODAL") then return true end
-    if ImGui.IsPopupOpen(ctx, "Переименовать / объединить актера###RENAME_ACTOR_MODAL") then return true end
+  if state.search_input_active then return true end
+  if not ctx or not ImGui then return false end
+  if ImGui.ValidatePtr and not ImGui.ValidatePtr(ctx, 'ImGui_Context*') then return false end
+
+  if ImGui.IsPopupOpen then
+    local function check_popup(name)
+      local ok, res = pcall(ImGui.IsPopupOpen, ctx, name)
+      return ok and res
+    end
+    if check_popup("Изменить текст субтитра###SUB_TEXT_EDIT_MODAL") then return true end
+    if check_popup("Изменить актера субтитра###SUB_ACTOR_EDIT_MODAL") then return true end
+    if check_popup("Переименовать актера###RENAME_ACTOR_MODAL") then return true end
+    if check_popup("Переименовать / объединить актера###RENAME_ACTOR_MODAL") then return true end
   end
-  if ctx and ImGui and ImGui.IsAnyItemActive and ImGui.IsAnyItemActive(ctx) then
-    if not ImGui.IsAnyMouseDown or not ImGui.IsAnyMouseDown(ctx) then
-      return true
+
+  if ImGui.IsAnyItemActive then
+    local ok_act, is_active = pcall(ImGui.IsAnyItemActive, ctx)
+    if ok_act and is_active then
+      local ok_mouse, is_down = true, false
+      if ImGui.IsAnyMouseDown then
+        ok_mouse, is_down = pcall(ImGui.IsAnyMouseDown, ctx)
+      end
+      if not ok_mouse or not is_down then
+        return true
+      end
     end
   end
   return false
@@ -883,7 +921,6 @@ function actions.check_timeline_sync(state)
         if not sync.drag_active then
           sync.drag_active = true
           sync.undo_snapshot = deep_copy_subs(state.subtitles)
-          if reaper.Undo_BeginBlock2 then reaper.Undo_BeginBlock2(0) end
         end
         sync.last_change_time = now_time
         sync.changed_sub_idx = i
@@ -953,16 +990,16 @@ function actions.check_timeline_sync(state)
     if not mouse_down and (now_time - sync.last_change_time > 0.18) then
       sync.drag_active = false
       local ch_idx = sync.changed_sub_idx or 1
-      if sync.undo_snapshot then
-        if not state.undo_stack then state.undo_stack = {} end
-        table.insert(state.undo_stack, {
+      if sync.undo_snapshot and state.push_undo then
+        local old_snap = {
           subtitles = sync.undo_snapshot,
-          name = "Синхронизация длительности строки #" .. ch_idx
-        })
-        if #state.undo_stack > 50 then table.remove(state.undo_stack, 1) end
-      end
-      if reaper.Undo_EndBlock2 then
-        reaper.Undo_EndBlock2(0, "NutNotes: Синхронизация длительности субтитра #" .. ch_idx, -1)
+          actor_palette = state.deep_copy_table and state.deep_copy_table(state.actor_palette),
+          selected_actors = state.deep_copy_table and state.deep_copy_table(state.selected_actors),
+          regions_displayed = actions.has_plugin_regions(),
+          items_displayed = actions.has_track_items(),
+          name = "Синхронизация длительности субтитра #" .. ch_idx
+        }
+        state.push_undo("Синхронизация длительности субтитра #" .. ch_idx, old_snap)
       end
       sync.undo_snapshot = nil
       state.save_to_project()
@@ -1086,6 +1123,78 @@ function actions.jump_to_time(sec)
   if reaper.UpdateTimeline then
     reaper.UpdateTimeline()
   end
+end
+
+-- Create a new subtitle from REAPER Time Selection (Loop Selection)
+function actions.create_subtitle_from_time_selection(state)
+  if not reaper or not state then return false end
+
+  local now_p = (reaper and reaper.time_precise and reaper.time_precise()) or os.clock()
+  if state._last_create_sub_time and (now_p - state._last_create_sub_time) < 0.25 then
+    return false
+  end
+  state._last_create_sub_time = now_p
+
+  local start_time, end_time = 0, 0
+  if reaper.GetSet_LoopTimeRange then
+    start_time, end_time = reaper.GetSet_LoopTimeRange(false, false, 0, 0, false)
+  end
+
+  if not start_time or not end_time or math.abs(end_time - start_time) < 0.05 then
+    -- No time selection active: trigger error sound and show red toast
+    local now_p = (reaper and reaper.time_precise and reaper.time_precise()) or os.clock()
+    state.time_selection_error_msg = "Выделите временной отрезок"
+    state.time_selection_error_until = now_p + 3.0
+
+    -- Cross-platform system beep / error sound
+    local beeped = false
+    if reaper and reaper.JS_Window_MessageBeep then
+      pcall(reaper.JS_Window_MessageBeep, 0x10) -- MB_ICONHAND / error sound
+      beeped = true
+    end
+    if not beeped and reaper and reaper.StuffMIDIMessage then
+      -- Fallback or terminal bell
+      io.write("\a")
+    end
+
+    return false
+  end
+
+  if end_time < start_time then
+    start_time, end_time = end_time, start_time
+  end
+
+  -- Subtitle created with noActor
+  local default_actor = "NoActor"
+
+  -- Record native REAPER undo point immediately upon creation
+  local new_idx, new_sub = state.add_subtitle_with_undo(start_time, end_time, default_actor, "", false)
+  if new_idx and new_sub then
+    state._is_creating_new_sub = new_idx
+
+    -- Clear any previous error toast upon success
+    state.time_selection_error_msg = nil
+    state.time_selection_error_until = 0
+
+    -- Timeline sync already committed inside undo block; initialize duration tracking
+    actions.init_timeline_sync(state)
+
+    -- Select newly created subtitle and scroll to it without opening popup modal
+    state._is_creating_new_sub = nil
+    state.selected_real_sub_idx = new_idx
+    local filtered = state.get_filtered_subtitles()
+    for fi, fs in ipairs(filtered) do
+      if fs == new_sub then
+        state.active_sub_idx = fi
+        break
+      end
+    end
+    state.last_centered_idx = -1
+    state.need_calc_scroll_target = true
+    return true
+
+  end
+  return false
 end
 
 return actions

@@ -1,7 +1,10 @@
 --[[
   @description NutNotes - REAPER Subtitle & Dubbing Assistant (ASS & SRT)
-  @version 0.3.0-beta
+  @version 0.4.0-beta
   @author NutNotes Community
+  @provides [main] NutNotes.lua
+  @requires ReaImGui
+  @requires js_ReaScriptAPI
   @about
     Полнофункциональный плагин/скрипт для Cockos REAPER для работы с субтитрами ASS и SRT.
     - Встраиваемое окно (Docker / Dockable Panel)
@@ -152,14 +155,6 @@ if type(config_flags) ~= "number" then
 end
 local ctx = ImGui.CreateContext('NutNotes', config_flags)
 
--- Keyboard passthrough: do not swallow REAPER global hotkeys (e.g. Space play/pause)
--- Keyboard input is only captured when an InputText widget is actively receiving text
-local nav_cap = ImGui.ConfigVar_NavCaptureKeyboard
-if type(nav_cap) == "function" then nav_cap = nav_cap() end
-if nav_cap and ImGui.SetConfigVar then
-  pcall(ImGui.SetConfigVar, ctx, nav_cap, 0)
-end
-
 -- Load saved project subtitles & settings on launch
 state.load_from_project()
 actions.init_timeline_sync(state)
@@ -177,16 +172,73 @@ local function loop()
   if ui.check_fonts then ui.check_fonts(ctx, state, ImGui) end
   if overlay.check_fonts then overlay.check_fonts(ctx, state, ImGui) end
 
-  -- Always set keyboard capture for global shortcuts: only capture when text is actively being edited
-  local is_text_active = actions.is_text_editing_active(ctx, state, ImGui)
-  if ImGui.SetNextFrameWantCaptureKeyboard then
-    pcall(ImGui.SetNextFrameWantCaptureKeyboard, ctx, is_text_active)
-  end
+  -- Automatic sync with REAPER native Undo/Redo stack
+  state.check_reaper_undo_sync(actions)
 
   -- Two-way timeline duration & position sync (Item <-> Region <-> Subtitles)
   actions.check_timeline_sync(state)
 
-  -- Draw main dockable window and tabs
+  -- 1. Check external action trigger (e.g. from NutNotes_CreateSubtitle.lua or REAPER Action List)
+  if reaper and reaper.GetExtState then
+    local trig = reaper.GetExtState("NUTNOTES", "ACTION_TRIGGER")
+    if trig and trig == "create_sub" then
+      reaper.SetExtState("NUTNOTES", "ACTION_TRIGGER", "", false)
+      actions.create_subtitle_from_time_selection(state)
+    end
+  end
+
+  -- 2. Global hotkey detection (Shift+T or T) when REAPER timeline/arrange view is focused (via JS_ReaScriptAPI)
+  if reaper and (reaper.JS_VKeys_GetState or reaper.JS_VKeys_GetDown) then
+    local is_reaper_active = true
+    if reaper.JS_Window_GetFocus then
+      is_reaper_active = (reaper.JS_Window_GetFocus() ~= nil)
+    elseif reaper.JS_Window_GetForeground and reaper.GetMainHwnd then
+      local fg = reaper.JS_Window_GetForeground()
+      local main_wnd = reaper.GetMainHwnd()
+      if fg and main_wnd then
+        is_reaper_active = (fg == main_wnd)
+                        or (reaper.JS_Window_IsChild and reaper.JS_Window_IsChild(main_wnd, fg))
+                        or (reaper.JS_Window_GetParent and reaper.JS_Window_GetParent(fg) == main_wnd)
+      end
+    end
+
+    if is_reaper_active then
+      local vkeys = reaper.JS_VKeys_GetState and reaper.JS_VKeys_GetState(0)
+      if not vkeys and reaper.JS_VKeys_GetDown then
+        vkeys = reaper.JS_VKeys_GetDown(0)
+      end
+      if vkeys and type(vkeys) == "string" and #vkeys >= 84 then
+        -- In js_ReaScriptAPI, byte N in the 255-byte string corresponds to virtual key N (1-based Lua string)
+        local t_down     = (vkeys:byte(0x54) ~= 0) -- 0x54 = VK_T (84)
+        local shift_down = (vkeys:byte(0x10) ~= 0) -- 0x10 = VK_SHIFT (16)
+        local ctrl_down  = (vkeys:byte(0x11) ~= 0) -- 0x11 = VK_CONTROL (17)
+        local alt_down   = (vkeys:byte(0x12) ~= 0) -- 0x12 = VK_MENU (18)
+
+        if reaper.JS_Mouse_GetState then
+          local mc = reaper.JS_Mouse_GetState(0x1C) -- 8=Shift, 4=Ctrl, 16=Alt
+          if (mc & 8) ~= 0 then shift_down = true end
+          if (mc & 4) ~= 0 then ctrl_down = true end
+          if (mc & 16) ~= 0 then alt_down = true end
+        end
+
+        local target_hk = state.hotkey_create_sub or "Shift+T"
+        local match = false
+        if target_hk == "Shift+T" then
+          match = shift_down and not ctrl_down and not alt_down and t_down
+        elseif target_hk == "T" then
+          match = not shift_down and not ctrl_down and not alt_down and t_down
+        end
+
+        local is_typing = actions.is_text_editing_active(ctx, state, ImGui)
+        if match and not state._prev_hk_create_sub_pressed and not is_typing then
+          actions.create_subtitle_from_time_selection(state)
+        end
+        state._prev_hk_create_sub_pressed = match
+      end
+    end
+  end
+
+  -- Draw main dockable window and tabs (hotkeys Delete, Ctrl+Z, Shift+T are handled inside ui.draw)
   local running = ui.draw(ctx, state, ImGui)
 
   -- Draw floating hardsub overlay window if enabled
@@ -194,20 +246,19 @@ local function loop()
     overlay.draw(ctx, state, ImGui)
   end
 
-  -- Return keyboard focus to REAPER on mouse release (clicks, drags, moving overlay, tab switches, etc.)
-  -- Ensures all REAPER shortcuts & binds (Record, Play/Pause, custom actions) work immediately
-  if (ImGui.IsMouseReleased(ctx, 0) or ImGui.IsMouseReleased(ctx, 1) or ImGui.IsMouseReleased(ctx, 2)) then
-    if not actions.is_text_editing_active(ctx, state, ImGui) and not actions.is_popup_open(ctx, ImGui) then
-      actions.return_focus_to_reaper()
-    end
-  end
-
   if running then
     reaper.defer(loop)
   else
+    if reaper and reaper.SetExtState then
+      reaper.SetExtState("NUTNOTES", "RUNNING", "", false)
+    end
     -- Save final state on close
     state.save_to_project()
   end
+end
+
+if reaper and reaper.SetExtState then
+  reaper.SetExtState("NUTNOTES", "RUNNING", "true", false)
 end
 
 -- Start loop

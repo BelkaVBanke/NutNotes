@@ -44,7 +44,9 @@ function colors.rgb_to_reaper(r, g, b)
   local ir = math.min(255, math.max(0, math.floor(r * 255 + 0.5)))
   local ig = math.min(255, math.max(0, math.floor(g * 255 + 0.5)))
   local ib = math.min(255, math.max(0, math.floor(b * 255 + 0.5)))
-  -- On Windows, REAPER ColorToNative is (ir) | (ig << 8) | (ib << 16)
+  if reaper and reaper.ColorToNative then
+    return reaper.ColorToNative(ir, ig, ib) | 0x1000000
+  end
   local native = ir + (ig * 256) + (ib * 65536)
   return native | 0x1000000
 end

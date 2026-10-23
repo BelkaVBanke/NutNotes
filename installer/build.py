@@ -4,9 +4,9 @@
 NutNotes Setup & Updater Builder Script
 Automates:
   1. Icon and asset generation (toolbar icons, .ico)
-  2. Downloading official x64 dependencies (ReaImGui, ReaPack)
+  2. Downloading official x64 dependencies (ReaImGui, ReaPack, js_ReaScriptAPI)
   3. Locating or bootstrapping Inno Setup (ISCC.exe)
-  4. Compiling the self-contained installer: installer/Output/NutNotes_Setup_vX.X.X.exe
+  4. Compiling the self-contained installer: build/v<version>/NutNotes_Setup_v<version>.exe
 """
 
 import os
@@ -21,7 +21,6 @@ INSTALLER_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(INSTALLER_DIR)
 ASSETS_DIR = os.path.join(INSTALLER_DIR, "assets")
 DEPS_DIR = os.path.join(INSTALLER_DIR, "dependencies")
-OUTPUT_DIR = os.path.join(INSTALLER_DIR, "Output")
 ISS_FILE = os.path.join(INSTALLER_DIR, "NutNotes_Installer.iss")
 
 # Tested dependencies versions
@@ -35,11 +34,28 @@ DEPS = [
         "filename": "reaper_reapack-x64.dll",
         "url": "https://github.com/cfillion/reapack/releases/download/v1.2.6/reaper_reapack-x64.dll",
         "desc": "ReaPack 64-bit extension"
+    },
+    {
+        "filename": "reaper_js_ReaScriptAPI64.dll",
+        "url": "https://github.com/julians83/js_ReaScriptAPI/releases/download/v1.002/reaper_js_ReaScriptAPI64.dll",
+        "desc": "js_ReaScriptAPI 64-bit extension"
     }
 ]
 
 def log(msg):
     print(f"[NutNotes Builder] {msg}")
+
+def get_current_version():
+    ver_file = os.path.join(PROJECT_DIR, "VERSION")
+    if os.path.exists(ver_file):
+        v = open(ver_file, "r", encoding="utf-8").read().strip()
+        if v:
+            return v
+    return "0.3.1-beta"
+
+def get_output_dir():
+    ver = get_current_version()
+    return os.path.join(PROJECT_DIR, "build", f"v{ver}")
 
 def ensure_assets():
     """Generate colored logo, wizard BMPs, ICO and REAPER toolbar icons"""
@@ -77,12 +93,10 @@ def ensure_dependencies():
 
 def find_iscc():
     """Locates ISCC.exe in system PATH, standard Program Files, or LocalAppData"""
-    # 1. Search in PATH
     which_iscc = shutil.which("iscc.exe") or shutil.which("iscc")
     if which_iscc and os.path.exists(which_iscc):
         return which_iscc
 
-    # 2. Search standard installation directories
     candidates = [
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"),
         os.path.expandvars(r"%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"),
@@ -95,7 +109,6 @@ def find_iscc():
         if os.path.exists(c):
             return c
 
-    # 3. Search via winget if available
     winget = shutil.which("winget")
     if winget:
         log("Inno Setup not found in standard paths. Attempting automated winget install...")
@@ -113,9 +126,11 @@ def find_iscc():
 
 def build_installer(iscc_path):
     """Compiles the installer via Inno Setup Command-Line Compiler"""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_dir = get_output_dir()
+    os.makedirs(output_dir, exist_ok=True)
     log(f"Compiling installer using {iscc_path}...")
     log(f"Script: {ISS_FILE}")
+    log(f"Destination: {output_dir}")
 
     cmd = [iscc_path, ISS_FILE]
     res = subprocess.run(cmd)
@@ -124,7 +139,7 @@ def build_installer(iscc_path):
         sys.exit(res.returncode)
 
     # Locate generated output file
-    out_files = [os.path.join(OUTPUT_DIR, f) for f in os.listdir(OUTPUT_DIR) if f.endswith(".exe")]
+    out_files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".exe")]
     if out_files:
         latest = max(out_files, key=os.path.getmtime)
         size_mb = os.path.getsize(latest) / (1024 * 1024)

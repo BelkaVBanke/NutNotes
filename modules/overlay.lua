@@ -25,7 +25,7 @@ local is_overlay_frame_active = false
 
 function overlay.attach_font_now(ctx, ImGui, size)
   if not ImGui or not ImGui.CreateFont or not ImGui.Attach or not ctx then return nil end
-  size = math.max(9, math.min(64, math.floor(size)))
+  size = math.max(9, math.min(96, math.floor(size)))
   if overlay_font_cache[size] ~= nil then
     return overlay_font_cache[size]
   end
@@ -47,7 +47,7 @@ end
 
 function overlay.init_fonts(ctx, state, ImGui)
   if not ImGui or not ImGui.CreateFont or not ImGui.Attach or not ctx then return end
-  local common_sizes = { 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 36, 40, 44, 48, 56, 64 }
+  local common_sizes = { 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 36, 40, 44, 48, 56, 64, 72, 80, 88, 96 }
   if state and state.overlay_font_size then
     table.insert(common_sizes, math.floor(state.overlay_font_size))
   end
@@ -67,7 +67,7 @@ function overlay.check_fonts(ctx, state, ImGui)
 end
 
 local function find_closest_overlay_font(size)
-  size = math.max(9, math.min(64, math.floor(size)))
+  size = math.max(9, math.min(96, math.floor(size)))
   if overlay_font_cache[size] then return overlay_font_cache[size] end
   local best_f = nil
   local best_diff = 999
@@ -85,7 +85,7 @@ end
 
 local function get_overlay_font(ctx, ImGui, size)
   if not ImGui or not ImGui.CreateFont or not ImGui.Attach then return nil end
-  size = math.max(9, math.min(64, math.floor(size)))
+  size = math.max(9, math.min(96, math.floor(size)))
   if overlay_font_cache[size] then
     return overlay_font_cache[size]
   end
@@ -627,36 +627,40 @@ function overlay.draw(ctx, state, ImGui)
         ImGui.SetCursorPosY(ctx, slot_start_y + main_slot_h)
 
         -- 3. TELEPROMPTER PROGRESS BAR (Positioned at constant Y below main_slot_h)
-        ImGui.Dummy(ctx, 1.0, 3.0)
-        local bar_padding = 14.0
-        local bar_w = math.max(20.0, win_w - bar_padding * 2)
-        local bar_h = 3.5
-        local bar_screen_x, bar_screen_y = ImGui.GetCursorScreenPos(ctx)
+        if not state.overlay_hide_progress then
+          ImGui.Dummy(ctx, 1.0, 3.0)
+          local bar_padding = 14.0
+          local bar_w = math.max(20.0, win_w - bar_padding * 2)
+          local bar_h = 3.5
+          local bar_screen_x, bar_screen_y = ImGui.GetCursorScreenPos(ctx)
 
-        local draw_list = ImGui.GetWindowDrawList(ctx)
-        -- Background track
-        ImGui.DrawList_AddRectFilled(draw_list, bar_screen_x, bar_screen_y, bar_screen_x + bar_w, bar_screen_y + bar_h, 0x00000055, 2.0)
+          local draw_list = ImGui.GetWindowDrawList(ctx)
+          -- Background track
+          ImGui.DrawList_AddRectFilled(draw_list, bar_screen_x, bar_screen_y, bar_screen_x + bar_w, bar_screen_y + bar_h, 0x00000055, 2.0)
 
-        -- Progress bar fill:
-        local filled_w = math.max(0.0, math.min(bar_w, bar_w * progress))
-        if filled_w > 0.5 then
-          local bar_col
-          if is_gap then
-            -- Shrinking countdown in gap: NEUTRAL GREY color
-            bar_col = ImGui.ColorConvertDouble4ToU32(0.52, 0.52, 0.52, 0.70)
-          else
-            -- Active speech filling bar: Actor color or text color (fully opaque)
-            local pal = state.actor_palette[main_sub.actor]
-            if pal and main_sub.actor ~= "NoActor" then
-              bar_col = ImGui.ColorConvertDouble4ToU32(pal.r, pal.g, pal.b, 1.0)
+          -- Progress bar fill:
+          local filled_w = math.max(0.0, math.min(bar_w, bar_w * progress))
+          if filled_w > 0.5 then
+            local bar_col
+            if is_gap then
+              -- Shrinking countdown in gap: NEUTRAL GREY color
+              bar_col = ImGui.ColorConvertDouble4ToU32(0.52, 0.52, 0.52, 0.70)
             else
-              bar_col = ImGui.ColorConvertDouble4ToU32(tr, tg, tb, 1.0)
+              -- Active speech filling bar: Actor color or text color (fully opaque)
+              local pal = state.actor_palette[main_sub.actor]
+              if pal and main_sub.actor ~= "NoActor" then
+                bar_col = ImGui.ColorConvertDouble4ToU32(pal.r, pal.g, pal.b, 1.0)
+              else
+                bar_col = ImGui.ColorConvertDouble4ToU32(tr, tg, tb, 1.0)
+              end
             end
+            ImGui.DrawList_AddRectFilled(draw_list, bar_screen_x, bar_screen_y, bar_screen_x + filled_w, bar_screen_y + bar_h, bar_col, 2.0)
           end
-          ImGui.DrawList_AddRectFilled(draw_list, bar_screen_x, bar_screen_y, bar_screen_x + filled_w, bar_screen_y + bar_h, bar_col, 2.0)
-        end
 
-        ImGui.Dummy(ctx, 1.0, bar_h + 3.0)
+          ImGui.Dummy(ctx, 1.0, bar_h + 3.0)
+        else
+          ImGui.Dummy(ctx, 1.0, 4.0)
+        end
 
         -- 4. PREVIEW OF NEXT SUBTITLE (below progress bar)
         -- Uses grid layout matching main slot when in left position!
@@ -935,6 +939,11 @@ function overlay.draw(ctx, state, ImGui)
         state.overlay_show_next_preview = new_prv
         state.save_settings()
       end
+      local rv_hp, new_hp = ImGui.MenuItem(ctx, "Скрыть прогресс реплики", nil, state.overlay_hide_progress)
+      if rv_hp then
+        state.overlay_hide_progress = new_hp
+        state.save_settings()
+      end
       local rv_act, new_act = ImGui.MenuItem(ctx, "Отображать имя актера", nil, state.overlay_show_actor)
       if rv_act then
         state.overlay_show_actor = new_act
@@ -995,8 +1004,9 @@ function overlay.draw(ctx, state, ImGui)
       end
       ImGui.EndDragDropTarget(ctx)
     end
-    ImGui.End(ctx)
   end
+
+  ImGui.End(ctx)
 
   is_overlay_frame_active = false
 

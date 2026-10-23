@@ -4,7 +4,7 @@
 ; =====================================================================
 
 #define MyAppName "NutNotes"
-#define MyAppVersion "0.3.0-beta"
+#define MyAppVersion "0.4.0-beta"
 #define MyAppPublisher "BelkaVBanke"
 #define MyAppURL "https://github.com/BelkaVBanke/NutNotes"
 #define MyAppReleasesURL "https://github.com/BelkaVBanke/NutNotes/releases"
@@ -27,7 +27,7 @@ DirExistsWarning=no
 EnableDirDoesntExistWarning=no
 PrivilegesRequired=lowest
 OutputBaseFilename=NutNotes_Setup_v{#MyAppVersion}
-OutputDir=Output
+OutputDir=..\build\v{#MyAppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 SetupIconFile=assets\app_icon.ico
@@ -66,6 +66,7 @@ russian.GitLatestFound=Доступна последняя версия: %1
 russian.GitConnectionFailed=Не удалось подключиться к GitHub (нет сети или репозиторий недоступен).
 russian.GitRetryBtn=Повторить попытку
 russian.StatusDownloading=Загрузка обновления NutNotes с GitHub...
+russian.ReaperRunningWarn=Внимание! Cockos REAPER в данный момент запущен.%n%nПожалуйста, закройте REAPER перед установкой или обновлением NutNotes, чтобы избежать блокировки системных файлов плагина.%n%nПосле закрытия REAPER нажмите «Повторить» для продолжения или «Отмена» для выхода.
 
 english.WarnOldVersion=Warning! During installation, the previous version of NutNotes and its actions in REAPER will be removed and updated.%n%nYour settings (reaper-extstate.ini) and project files will NOT be affected.%n%nContinue with installation?
 english.StatusCleaning=Removing previous plugin files and cleaning old actions...
@@ -79,9 +80,10 @@ english.GitLatestFound=Latest version available: %1
 english.GitConnectionFailed=Unable to connect to GitHub (offline or repository unavailable).
 english.GitRetryBtn=Retry
 english.StatusDownloading=Downloading NutNotes update from GitHub...
+english.ReaperRunningWarn=Warning! Cockos REAPER is currently running.%n%nPlease close REAPER before installing or updating NutNotes to prevent plugin file locking.%n%nAfter closing REAPER, click "Retry" to continue or "Cancel" to exit.
 
 [Tasks]
-Name: "dependencies"; Description: "Установить зависимости в REAPER (ReaImGui x64, ReaPack x64, ReaTeam Extensions API)"; GroupDescription: "Зависимости:"; Flags: checkablealone
+Name: "dependencies"; Description: "Установить зависимости в REAPER (ReaImGui x64, ReaPack x64, js_ReaScriptAPI x64, ReaTeam Extensions API)"; GroupDescription: "Зависимости:"; Flags: checkablealone
 Name: "autostart"; Description: "Включить автозапуск NutNotes при старте REAPER (Scripts/__startup.lua)"; GroupDescription: "Интеграция в REAPER:"; Flags: unchecked
 Name: "toolbar"; Description: "Добавить кнопку запуска NutNotes на главную панель (Main Toolbar)"; GroupDescription: "Интеграция в REAPER:"; Flags: unchecked
 Name: "examples"; Description: "Установить примеры и тестовые файлы субтитров"; GroupDescription: "Дополнительно:"; Flags: unchecked
@@ -99,6 +101,7 @@ Source: "..\test_samples\*"; DestDir: "{app}\Scripts\NutNotes\test_samples"; Tas
 ; 3. Dependencies (optional task)
 Source: "dependencies\reaper_imgui-x64.dll"; DestDir: "{app}\UserPlugins"; Tasks: dependencies; Flags: ignoreversion
 Source: "dependencies\reaper_reapack-x64.dll"; DestDir: "{app}\UserPlugins"; Tasks: dependencies; Flags: ignoreversion
+Source: "dependencies\reaper_js_ReaScriptAPI64.dll"; DestDir: "{app}\UserPlugins"; Tasks: dependencies; Flags: ignoreversion
 Source: "dependencies\ReaTeam Extensions\*"; DestDir: "{app}\Scripts\ReaTeam Extensions"; Tasks: dependencies; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; 4. Toolbar icon (always copy or if toolbar task)
@@ -127,6 +130,25 @@ var
   GitWorkerScript: String;
   OldVersionWarningConfirmed: Boolean;
   LastWarnedPath: String;
+
+function InitializeSetup(): Boolean;
+var
+  Wnd: HWND;
+begin
+  Result := True;
+  while True do
+  begin
+    Wnd := FindWindowByClassName('REAPERwnd');
+    if Wnd = 0 then
+      Break;
+
+    if MsgBox(CustomMessage('ReaperRunningWarn'), mbError, MB_RETRYCANCEL) = IDCANCEL then
+    begin
+      Result := False;
+      Exit;
+    end;
+  end;
+end;
 
 // ---------- Keep your existing CleanVersionStr and
 // CompareSemanticVersions functions unchanged. ----------
