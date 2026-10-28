@@ -101,32 +101,126 @@ function parser.parse_srt_time(str)
   return 0
 end
 
--- Clean ASS text: strip {\...} tags, invisible Unicode marks, and convert \N to newlines
-function parser.clean_ass_text(text)
+-- Universal subtitle tag cleaner: strips braced ASS tags ({...}), HTML tags (<...>),
+-- and unbraced ASS override tags (\c&Hffffff&, \1c&H...&, \an8, \i1, \b0, \pos(...), etc.)
+function parser.strip_formatting_tags(text)
   if not text then return "" end
   text = parser.strip_invisible_unicode(text)
-  -- Replace escaped newlines
+
+  -- 1. Standard ASS escaped spaces and newlines
   text = text:gsub("\\N", "\n"):gsub("\\n", "\n"):gsub("\\h", " ")
-  -- Strip style tags like {\an8}, {\b1}, {\c&HFFFFFF&}
+
+  -- 2. Strip braced ASS style override blocks: {...}
   text = text:gsub("{[^}]+}", "")
-  -- Strip carriage returns
-  text = text:gsub("\r", "")
-  -- Trim leading/trailing whitespace
-  text = text:match("^%s*(.-)%s*$") or text
-  return text
-end
 
--- Clean SRT text: strip HTML/formatting tags like <i>, </b>, <font...>, and invisible Unicode marks
-function parser.clean_srt_text(text)
-  if not text then return "" end
-  text = parser.strip_invisible_unicode(text)
+  -- 3. Strip HTML/XML formatting tags: <...> (e.g. <i>, </b>, <font...>)
   text = text:gsub("<[^>]+>", "")
+
+  -- 4. Strip unbraced ASS color and alpha override tags (e.g. \c&Hffffff&, \1c&H...&, \3a&H...&)
+  text = text:gsub("\\[1-4]?[ca]&H%x+&?", "")
+
+  -- 5. Strip unbraced ASS tags with parenthesized parameters (\pos(...), \fad(...), \move(...), \org(...), etc.)
+  text = text:gsub("\\[%a]+%b()", "")
+
+  -- 6. Strip unbraced ASS simple style tags (\i0, \i1, \b0, \b1, \u0, \s0, \an8, \a9, \fs20, \q2, etc.)
+  text = text:gsub("\\[abikouprs][%a%d_]*", "")
+
+  -- 7. Strip leftover backslash tags like \blur1, \fscx100, \bord2
+  text = text:gsub("\\[%a]+[%d%.]*", "")
+
+  -- 8. Strip carriage returns and trim whitespace
   text = text:gsub("\r", "")
   text = text:match("^%s*(.-)%s*$") or text
   return text
 end
 
--- Parse actor in SRT text line
+-- Stably sort subtitles in chronological order by start_time (then end_time)
+function parser.sort_subtitles(subs)
+  if not subs or #subs <= 1 then return subs end
+  for i = 1, #subs do
+    subs[i]._orig_idx = i
+  end
+  table.sort(subs, function(a, b)
+    local diff = a.start_time - b.start_time
+    if math.abs(diff) > 0.0001 then
+      return a.start_time < b.start_time
+    end
+    local diff_end = (a.end_time or 0) - (b.end_time or 0)
+    if math.abs(diff_end) > 0.0001 then
+      return (a.end_time or 0) < (b.end_time or 0)
+    end
+    return (a._orig_idx or 0) < (b._orig_idx or 0)
+  end)
+  for i = 1, #subs do
+    subs[i]._orig_idx = nil
+  end
+  return subs
+end
+
+-- Clean ASS text: strip all formatting tags and convert escapes
+function parser.clean_ass_text(text)
+  return parser.strip_formatting_tags(text)
+end
+
+-- Clean SRT text: strip HTML/formatting tags and unbraced ASS override codes
+function parser.clean_srt_text(text)
+  return parser.strip_formatting_tags(text)
+end
+
+-- Detect if a candidate string is an obvious director note / stage direction / foley effect
+-- instead of an actor name. Keeps such notes intact in dialogue text.
+function parser.is_director_note(str)
+  if not str or #str == 0 then return false end
+  local s = str:lower():match("^%s*(.-)%s*$")
+  if not s or #s == 0 then return false end
+
+  -- Sound and foley keywords anywhere in the phrase
+  local sound_keywords = {
+    "звук", "шум", "стук", "звон", "лязг", "грохот", "шаг", "выстрел", "музык",
+    "взрыв", "гудок", "скрип", "треск", "кашель", "хлопок", "сирен", "шепот", "шёпот",
+    "дыхани", "дышит", "голос", "пауз", "вздох", "смех", "плач", "крик", "поворач", "оглядыв"
+  }
+  for _, kw in ipairs(sound_keywords) do
+    if s:find(kw, 1, true) then
+      return true
+    end
+  end
+
+  local exact_notes = {
+    ["тихо"]=true, ["громко"]=true, ["кричит"]=true, ["вскрикивает"]=true, ["вскрик"]=true,
+    ["смеется"]=true, ["смеётся"]=true, ["усмехается"]=true, ["плачет"]=true, ["рыдает"]=true, ["рыдание"]=true,
+    ["всхлипывает"]=true, ["всхлип"]=true, ["молчание"]=true,
+    ["в сторону"]=true, ["вбок"]=true, ["за кадром"]=true, ["з.к."]=true, ["зк"]=true, ["з/к"]=true,
+    ["по телефону"]=true, ["по рации"]=true, ["рация"]=true, ["телефон"]=true,
+    ["мысли"]=true, ["про себя"]=true, ["сонно"]=true, ["устало"]=true, ["сердито"]=true, ["испуганно"]=true,
+    ["радостно"]=true, ["грустно"]=true, ["сарказм"]=true, ["иронично"]=true, ["зевает"]=true, ["стонет"]=true, ["стон"]=true,
+    ["быстро"]=true, ["медленно"]=true, ["спокойно"]=true, ["холодно"]=true,
+    ["хмыкает"]=true, ["хмыкнул"]=true, ["бормочет"]=true, ["напевает"]=true, ["поет"]=true, ["поёт"]=true, ["сдавленно"]=true, ["злобно"]=true,
+    ["ехидно"]=true, ["недовольно"]=true, ["возмущенно"]=true, ["удивленно"]=true,
+    ["растерянно"]=true, ["дрожащим голосом"]=true, ["сквозь слезы"]=true,
+    ["сквозь зубы"]=true, ["поворачивается"]=true, ["оглядывается"]=true,
+    ["перебивает"]=true, ["перебивая"]=true, ["улыбается"]=true, ["улыбаясь"]=true,
+    ["смеясь"]=true, ["плача"]=true, ["крича"]=true, ["задыхаясь"]=true, ["хрипит"]=true, ["шепчет"]=true, ["рычит"]=true,
+    ["воет"]=true, ["пищит"]=true, ["заикается"]=true, ["дрожит"]=true,
+    ["в ужасе"]=true, ["в ярости"]=true, ["с насмешкой"]=true, ["с иронией"]=true
+  }
+  if exact_notes[s] then
+    return true
+  end
+
+  for w in s:gmatch("%S+") do
+    local clean_w = w:gsub("[%p]", "")
+    if exact_notes[clean_w] then
+      return true
+    end
+    if clean_w:find("ось$") or clean_w:find("ясь$") or clean_w:find("вшись$") or clean_w:find("ая$") or clean_w:find("яя$") then
+      return true
+    end
+  end
+
+  return false
+end
+
 function parser.parse_srt_actor(text)
   if not text then return "NoActor", "" end
 
@@ -162,14 +256,24 @@ function parser.parse_srt_actor(text)
       end
       if not is_all_num then
         local rest = clean:sub(pos):match("^%s*:?%s*(.*)$") or ""
-        if #brackets == 1 then
-          local b_actor = brackets[1]
-          if #b_actor <= 50 then
-            return b_actor, rest:match("^%s*(.-)%s*$")
+        local trimmed_rest = rest:match("^%s*(.-)%s*$") or ""
+        -- If no dialogue follows the bracket, it's a sound effect or caption (e.g. "[Шум дождя]"), not an actor!
+        if #trimmed_rest > 0 then
+          if #brackets == 1 then
+            local b_actor = brackets[1]
+            if #b_actor <= 40 and not parser.is_director_note(b_actor) then
+              return b_actor, trimmed_rest
+            end
+          else
+            local has_note = false
+            for _, b in ipairs(brackets) do
+              if parser.is_director_note(b) then has_note = true break end
+            end
+            if not has_note then
+              local b_actor = "[" .. table.concat(brackets, "][") .. "]"
+              return b_actor, trimmed_rest
+            end
           end
-        else
-          local b_actor = "[" .. table.concat(brackets, "][") .. "]"
-          return b_actor, rest:match("^%s*(.-)%s*$")
         end
       end
     end
@@ -177,38 +281,43 @@ function parser.parse_srt_actor(text)
 
   -- 3. Parenthesis tag: (ActorName): Dialogue or (ActorName) Dialogue
   local p_actor, p_dialogue = clean:match("^%(([^%)]+)%)%s*:?%s*(.*)$")
-  if p_actor and #p_actor <= 50 and not p_actor:match("^%d+$") then
-    return p_actor:match("^%s*(.-)%s*$"), p_dialogue:match("^%s*(.-)%s*$")
+  if p_actor and #p_actor <= 40 and not p_actor:match("^%d+$") then
+    local trimmed_p_diag = p_dialogue and p_dialogue:match("^%s*(.-)%s*$") or ""
+    -- If no dialogue follows or it's an obvious director note, keep it intact in dialogue text!
+    if #trimmed_p_diag > 0 and not parser.is_director_note(p_actor) then
+      return p_actor:match("^%s*(.-)%s*$"), trimmed_p_diag
+    end
   end
 
   -- 4. Colon prefix: ActorName: Dialogue
   local c_actor, c_dialogue = clean:match("^([^:\r\n]+):%s*(.*)$")
-  if c_actor and #c_actor <= 50 then
+  if c_actor and #c_actor <= 35 and not parser.is_director_note(c_actor) then
     local trimmed_actor = c_actor:match("^%s*(.-)%s*$")
     local clean_diag = c_dialogue and c_dialogue:match("^%s*(.-)%s*$") or ""
-    -- Must have actual dialogue following the colon
     if #clean_diag > 0
        and trimmed_actor
        and not trimmed_actor:lower():find("^https?://")
        and not trimmed_actor:match("^%d+$")
        and not trimmed_actor:match("^%d%d$")
        and #trimmed_actor > 0 then
-      -- Avoid false positives on direct speech sentences like 'А если бы сказал: "Привет"'
       local is_dialogue_clause = false
+      local word_count = 0
       local particles = {
         ["а"]=true, ["А"]=true, ["и"]=true, ["И"]=true, ["но"]=true, ["Но"]=true,
         ["если"]=true, ["Если"]=true, ["бы"]=true, ["Бы"]=true, ["ли"]=true, ["же"]=true,
         ["не"]=true, ["Не"]=true, ["что"]=true, ["Что"]=true, ["как"]=true, ["Как"]=true,
-        ["когда"]=true, ["Когда"]=true
+        ["когда"]=true, ["Когда"]=true, ["он"]=true, ["Он"]=true, ["она"]=true, ["Она"]=true,
+        ["они"]=true, ["Они"]=true, ["то"]=true, ["То"]=true, ["так"]=true, ["Так"]=true
       }
       for word in trimmed_actor:gmatch("%S+") do
-        local clean_w = word:gsub("[%.,!%?\"']", "")
+        word_count = word_count + 1
+        local clean_w = word:gsub("[%p]", "")
         if particles[clean_w] then
           is_dialogue_clause = true
           break
         end
       end
-      if not is_dialogue_clause then
+      if not is_dialogue_clause and word_count <= 4 then
         return trimmed_actor, clean_diag
       end
     end
@@ -440,6 +549,8 @@ function parser.parse_ass(content)
     return a:lower() < b:lower()
   end)
 
+  parser.sort_subtitles(subtitles)
+
   return {
     ok = true,
     format = "ASS",
@@ -450,10 +561,19 @@ function parser.parse_ass(content)
 end
 
 -- Parse SRT content (fast linear single-pass parser)
-function parser.parse_srt(content)
+function parser.parse_srt(content, opts)
   content = parser.strip_utf8_bom(content)
   content = parser.strip_invisible_unicode(content)
   content = content:gsub("\r\n", "\n"):gsub("\r", "\n")
+
+  local parse_actors = true
+  if opts then
+    if opts.parse_srt_actors ~= nil then
+      parse_actors = opts.parse_srt_actors
+    elseif opts.smart_srt_actors ~= nil then
+      parse_actors = opts.smart_srt_actors
+    end
+  end
 
   local subtitles = {}
   local actors_set = {}
@@ -465,30 +585,46 @@ function parser.parse_srt(content)
 
   local function flush_block()
     if cur_timing_start and cur_timing_end and #cur_text_lines > 0 then
-      -- If last text line was an index number for the next subtitle (in case of missing blank line)
       if #cur_text_lines > 1 and cur_text_lines[#cur_text_lines]:match("^%d+$") then
         table.remove(cur_text_lines)
       end
       local raw_text = table.concat(cur_text_lines, "\n")
-      local raw_actor, clean_text = parser.parse_srt_actor(raw_text)
-      local actors, character, display_actor = parser.parse_actor_and_character(raw_actor)
+      if not parse_actors then
+        local clean_text = parser.clean_srt_text(raw_text)
+        table.insert(subtitles, {
+          start_time = cur_timing_start,
+          end_time = cur_timing_end,
+          actor = "NoActor",
+          actors = { "NoActor" },
+          character = "",
+          raw_actor = "",
+          text = clean_text,
+          _raw_block_text = raw_text
+        })
+        actors_set["NoActor"] = true
+        actor_counts["NoActor"] = (actor_counts["NoActor"] or 0) + 1
+      else
+        local raw_actor, clean_text = parser.parse_srt_actor(raw_text)
+        local actors, character, display_actor = parser.parse_actor_and_character(raw_actor)
 
-      table.insert(subtitles, {
-        start_time = cur_timing_start,
-        end_time = cur_timing_end,
-        actor = display_actor,
-        actors = actors,
-        character = character,
-        raw_actor = raw_actor,
-        text = clean_text
-      })
+        table.insert(subtitles, {
+          start_time = cur_timing_start,
+          end_time = cur_timing_end,
+          actor = display_actor,
+          actors = actors,
+          character = character,
+          raw_actor = raw_actor,
+          text = clean_text,
+          _raw_block_text = raw_text
+        })
 
-      local seen_in_sub = {}
-      for _, a in ipairs(actors) do
-        if not seen_in_sub[a] then
-          seen_in_sub[a] = true
-          actors_set[a] = true
-          actor_counts[a] = (actor_counts[a] or 0) + 1
+        local seen_in_sub = {}
+        for _, a in ipairs(actors) do
+          if not seen_in_sub[a] then
+            seen_in_sub[a] = true
+            actors_set[a] = true
+            actor_counts[a] = (actor_counts[a] or 0) + 1
+          end
         end
       end
     end
@@ -515,6 +651,70 @@ function parser.parse_srt(content)
 
   flush_block()
 
+  -- Smart SRT Actor Heuristics:
+  -- Detect and fix false-positive actors in plain SRT files
+  -- Smart SRT heuristics are applied automatically when SRT actor parsing is enabled
+  if parse_actors and #subtitles >= 8 then
+    local total_subs = #subtitles
+    local actor_subs_count = 0
+    local empty_text_actor_subs = 0
+    local actor_line_counts = {}
+
+    for _, sub in ipairs(subtitles) do
+      if sub.actor and sub.actor ~= "NoActor" then
+        actor_subs_count = actor_subs_count + 1
+        actor_line_counts[sub.actor] = (actor_line_counts[sub.actor] or 0) + 1
+        if not sub.text or #sub.text == 0 then
+          empty_text_actor_subs = empty_text_actor_subs + 1
+        end
+      end
+    end
+
+    local distinct_actor_count = 0
+    for _ in pairs(actor_line_counts) do
+      distinct_actor_count = distinct_actor_count + 1
+    end
+
+    local is_false_positive = false
+    -- Case 1: Almost all lines have no actors, and only 1-2 lines have an actor
+    if actor_subs_count > 0 and actor_subs_count <= 2 and total_subs >= 15 then
+      is_false_positive = true
+    -- Case 2: Subtitles with actors are a tiny fraction (< 4%) of a large file (e.g. 8 lines out of 3500)
+    elseif actor_subs_count > 0 and (actor_subs_count / total_subs) < 0.04 then
+      is_false_positive = true
+    -- Case 3: Many empty text lines caused by stage directions / sounds in brackets/parentheses
+    elseif empty_text_actor_subs > 0 and (empty_text_actor_subs / math.max(1, actor_subs_count)) > 0.15 then
+      is_false_positive = true
+    -- Case 4: High number of distinct actors where nearly each actor has only 1 line
+    elseif distinct_actor_count >= 8 and (actor_subs_count / distinct_actor_count) < 1.35 then
+      is_false_positive = true
+    end
+
+    if is_false_positive then
+      actors_set = { ["NoActor"] = true }
+      actor_counts = { ["NoActor"] = total_subs }
+      for _, sub in ipairs(subtitles) do
+        if sub.actor and sub.actor ~= "NoActor" then
+          if sub._raw_block_text and #sub._raw_block_text > 0 then
+            sub.text = parser.clean_srt_text(sub._raw_block_text)
+          elseif not sub.text or #sub.text == 0 then
+            sub.text = sub.raw_actor or sub.actor
+          else
+            sub.text = (sub.raw_actor or sub.actor) .. ": " .. sub.text
+          end
+          sub.actor = "NoActor"
+          sub.actors = { "NoActor" }
+          sub.character = ""
+          sub.raw_actor = ""
+        end
+      end
+    end
+  end
+
+  for _, sub in ipairs(subtitles) do
+    sub._raw_block_text = nil
+  end
+
   local actors_list = {}
   for actor in pairs(actors_set) do
     table.insert(actors_list, actor)
@@ -525,6 +725,8 @@ function parser.parse_srt(content)
     return a:lower() < b:lower()
   end)
 
+  parser.sort_subtitles(subtitles)
+
   return {
     ok = true,
     format = "SRT",
@@ -534,30 +736,37 @@ function parser.parse_srt(content)
   }
 end
 
--- Auto-detect format and parse
-function parser.parse(content, filename_or_ext)
+function parser.parse(content, filename_or_ext, opts)
+  if not content or #content == 0 then
+    return { ok = false, error = "Content is empty" }
+  end
+
   local ext = ""
   if filename_or_ext then
     ext = filename_or_ext:match("%.([^%.]+)$") or filename_or_ext
     ext = ext:lower()
   end
 
+  local res = nil
   if ext == "ass" or ext == "ssa" or content:find("%[Script Info%]") or content:find("%[Events%]") then
-    return parser.parse_ass(content)
+    res = parser.parse_ass(content, opts)
   elseif ext == "srt" or content:find("%-%->") then
-    return parser.parse_srt(content)
+    res = parser.parse_srt(content, opts)
   else
-    -- Try ASS first, then SRT
     if content:find("%[Events%]") then
-      return parser.parse_ass(content)
+      res = parser.parse_ass(content, opts)
     else
-      return parser.parse_srt(content)
+      res = parser.parse_srt(content, opts)
     end
   end
+  if res and res.ok and res.subtitles then
+    parser.sort_subtitles(res.subtitles)
+  end
+  return res
 end
 
 -- Read from disk and parse
-function parser.parse_file(filepath)
+function parser.parse_file(filepath, opts)
   local f, err = io.open(filepath, "rb")
   if not f then
     return { ok = false, error = "Cannot open file: " .. tostring(err) }
@@ -569,7 +778,7 @@ function parser.parse_file(filepath)
     return { ok = false, error = "File is empty: " .. filepath }
   end
 
-  local res = parser.parse(content, filepath)
+  local res = parser.parse(content, filepath, opts)
   if res and res.ok then
     res.filepath = filepath
     res.filename = filepath:match("([^/\\]+)$") or filepath

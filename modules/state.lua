@@ -7,7 +7,7 @@ local colors = require('colors')
 local parser = require('parser')
 
 local state = {
-  version = "0.4.1-beta",
+  version = "0.5.0-beta",
   -- Project identifier tracker
   last_proj = nil,
 
@@ -37,6 +37,7 @@ local state = {
   text_custom_color = { 175 / 255, 175 / 255, 175 / 255 }, -- Default monochrome text color when text_tint_lines == false (0xAFAFAFFF)
   text_tint_actor_names = true, -- Tint actor badge name with actor's color (default true for current behavior)
   hotkey_create_sub = "Shift+T", -- Hotkey to create subtitle from REAPER time selection
+  parse_srt_actors = true, -- Parse actors from SRT with smart heuristics (if false, load all as NoActor)
 
   -- Text & Typography settings
   text_font_family = "Segoe UI",
@@ -47,12 +48,25 @@ local state = {
   text_active_spacing = true,
   text_active_spacing_px = 8.0,
   text_highlight_brightness = 0.28,
+  text_fixed_lead_in = false,     -- If true, fixed lookahead; if false, triggers immediately upon replica completion
   text_lead_in_time = 0.35,       -- Pre-roll interval (sec) before line begins to smoothly glide and enlarge
   smooth_scroll_enabled = true,   -- Smooth scroll interpolation
   smooth_scroll_speed = 14.0,     -- Exponential lerp speed for smooth scrolling
   row_alternating_bg = false,     -- Subtle alternating row background for inactive lines
   row_alternating_strength = 0.07, -- Subtle darkness factor for alternating rows (0.01 to 0.20)
   text_preview_collapsed = false, -- Collapsed state of live text preview in Tab 3
+
+  -- View mode settings
+  view_mode = "table",           -- "table" (default full table list) or "note" (single active line SWS style)
+  note_auto_wrap = true,         -- Auto-wrap lines in Note view to maximize font size
+  note_min_font_size = 18.0,     -- Minimum font size in Note view (px)
+  note_max_font_size = 72.0,     -- Maximum font size in Note view (px)
+  note_show_actor = true,        -- Show actor badge in Note view
+  note_show_progress = true,     -- Show progress bar and hold indication in Note view
+  note_edit_font_size = 20.0,    -- Editable text font size in non-focus Note view (px)
+
+  -- Region sync flag
+  regions_enabled = true,        -- Timeline regions enabled flag (checkbox)
 
   -- General & Accent settings
   accent_color = { 35 / 255, 35 / 255, 35 / 255 }, -- Default accent RGB: Black (35, 35, 35) (0x232323FF)
@@ -62,6 +76,13 @@ local state = {
 
   -- Overlay settings
   overlay_enabled = false,
+  timer_overlay_enabled = false, -- Dedicated floating timer overlay for script-based recording
+  timer_overlay_font_family = "Segoe UI", -- Font family for timer overlay
+  timer_overlay_format = 1, -- 1: MM:SS.dd, 2: HH:MM:SS.dd, 3: SS.dd, 4: MM:SS.d, 5: HH:MM:SS.d, 6: SS.d, 7: MM:SS, 8: HH:MM:SS
+  timer_overlay_color_mode = 1, -- 1: Нет (по умолчанию, свой цвет / белый), 2: Включено (динамическая индикация статуса REAPER)
+  timer_custom_color = { 1.0, 1.0, 1.0, 1.0 }, -- Default white
+  timer_overlay_bg_alpha = 0.75,
+  timer_overlay_bg_color = { 0.0, 0.0, 0.0, 0.75 },
   overlay_always_on_top = false,
   overlay_bg_alpha = 0.75,
   overlay_bg_color = { 0.0, 0.0, 0.0, 0.75 },
@@ -82,6 +103,18 @@ local state = {
   overlay_show_all_actors = true, -- If true, show lines from all actors regardless of filter
   overlay_tint_lines = false, -- Tint subtitle lines in overlay using actor's pastel color
   overlay_tint_only_filtered = false, -- If true, tint only lines belonging to filtered actors
+  text_show_cps = false, -- If true, show CPS badge in Tab 1 rows (right of time/actor, left of text)
+  text_sync_overlay_hold = true, -- If true, sync replica hold state with overlay (hold bar color & +X.Xs text)
+  overlay_hold_mode = 2, -- 1: Off (strict timing), 2: Gaps only (default), 3: Cascading shift with overlap
+  overlay_target_cps = 17.0, -- Target reading speed (chars/sec) for hold/shift calculation (default 17.0)
+  overlay_max_hold = 0.7, -- Max hold duration per line in gaps (sec, default 0.7)
+  overlay_max_drift = 2.5, -- Max cumulative cascade drift (sec, default 2.5)
+  overlay_show_drift_badge = true, -- Show overtime/drift badge (+X.Xs) in overlay
+
+  -- Optimization: Dynamic timeline region streaming
+  timeline_streaming_enabled = false, -- Default false
+  timeline_streaming_radius_min = 5.0, -- Default 5 minutes
+  timeline_streaming_min_subs = 3000, -- Default 3000 subtitles threshold
 
   -- Undo Stack & REAPER native sync
   undo_stack = {},
@@ -485,8 +518,11 @@ function state.capture_snapshot(action_name)
   local has_itms = nil
   local ok_act, actions = pcall(require, 'actions')
   if ok_act and actions then
-    if actions.has_plugin_regions then has_rgns = actions.has_plugin_regions() end
-    if actions.has_track_items then has_itms = actions.has_track_items() end
+    if actions.timeline_sync and actions.timeline_sync.last_rgn_count and actions.timeline_sync.last_rgn_count >= 0 then
+      has_rgns = (actions.timeline_sync.last_rgn_count > 0)
+    elseif actions.has_plugin_regions then
+      has_rgns = actions.has_plugin_regions()
+    end
   end
   return {
     subtitles = deep_copy_subtitles(state.subtitles),
@@ -494,7 +530,8 @@ function state.capture_snapshot(action_name)
     selected_actors = deep_copy_table(state.selected_actors),
     default_region_color = state.default_region_color and { state.default_region_color[1], state.default_region_color[2], state.default_region_color[3] },
     regions_displayed = has_rgns,
-    items_displayed = has_itms,
+    filename = state.filename,
+    filepath = state.filepath,
     name = action_name or "Действие с субтитрами"
   }
 end
@@ -510,8 +547,8 @@ function state.init_undo_tracking()
   end
 end
 
--- Push snapshot to REAPER native undo
-function state.push_undo(action_name, old_snapshot, on_commit)
+-- Push snapshot or delta to REAPER native undo
+function state.push_undo(action_name, old_snapshot, on_commit, delta)
   if not reaper or not reaper.Undo_BeginBlock2 then
     if on_commit then pcall(on_commit) end
     return
@@ -526,7 +563,7 @@ function state.push_undo(action_name, old_snapshot, on_commit)
   cur_step = cur_step or state.current_step_id or 1
   if not state.undo_history then state.undo_history = {} end
 
-  -- Store pre-action snapshot at cur_step
+  -- Store pre-action snapshot at cur_step if not already stored
   if old_snapshot then
     state.undo_history[cur_step] = old_snapshot
   elseif not state.undo_history[cur_step] then
@@ -536,8 +573,12 @@ function state.push_undo(action_name, old_snapshot, on_commit)
   local next_step = (math.max(state.next_step_id or 1, cur_step)) + 1
   state.next_step_id = next_step
 
-  -- Store post-action snapshot at next_step
-  state.undo_history[next_step] = state.capture_snapshot(action_name)
+  -- Store post-action snapshot or delta at next_step
+  if delta and not old_snapshot then
+    state.undo_history[next_step] = { delta = delta, name = action_name }
+  else
+    state.undo_history[next_step] = state.capture_snapshot(action_name)
+  end
 
   -- Prune old history steps beyond 150 steps from current to keep memory strictly bounded
   local max_history = 150
@@ -557,11 +598,9 @@ function state.push_undo(action_name, old_snapshot, on_commit)
   -- Commit timeline/project changes strictly INSIDE the REAPER undo block
   -- so REAPER bundles them with this action instead of leaking into subsequent time selection or user actions!
   if on_commit then
-    pcall(on_commit)
-  else
-    local ok_act, act_mod = pcall(require, 'actions')
-    if ok_act and act_mod and act_mod.sync_filter_to_timeline then
-      pcall(act_mod.sync_filter_to_timeline, state)
+    local ok, err = pcall(on_commit)
+    if not ok and reaper and reaper.ShowConsoleMsg then
+      reaper.ShowConsoleMsg("[NutNotes on_commit Error]: " .. tostring(err) .. "\n")
     end
   end
 
@@ -578,7 +617,15 @@ end
 function state.check_reaper_undo_sync(actions)
   if not reaper then return false end
   local cur_step = state.get_current_anchor_step()
-  if not cur_step then return false end
+
+  -- If anchor marker is missing, REAPER has rolled back before the anchor marker existed (e.g. Initial State)!
+  if not cur_step then
+    if state.current_step_id and state.current_step_id > 1 then
+      cur_step = 1
+    else
+      return false
+    end
+  end
 
   if state.current_step_id == nil then
     state.init_undo_tracking()
@@ -589,29 +636,112 @@ function state.check_reaper_undo_sync(actions)
     return false
   end
 
-  -- Anchor marker step changed (REAPER Undo or Redo occurred!)
+  local prev_step = state.current_step_id
+
   if not state.undo_history then state.undo_history = {} end
-  local snapshot = state.undo_history[cur_step]
-  if not snapshot then
-    -- Step not found in memory (e.g. project was reopened or step purged)
-    state.current_step_id = cur_step
-    return false
+
+  -- Suppress timeline sync false-drag detection while REAPER is rolling back
+  if not actions then
+    local ok_act, act_mod = pcall(require, 'actions')
+    if ok_act then actions = act_mod end
+  end
+  if actions and actions.timeline_sync then
+    actions.timeline_sync.drag_active = false
+    actions.timeline_sync.suppress_until = (reaper.time_precise and reaper.time_precise() or os.clock()) + 0.5
   end
 
-  -- Rollback / forward state from snapshot
-  state.subtitles = deep_copy_subtitles(snapshot.subtitles)
-  if snapshot.actor_palette then
-    state.actor_palette = deep_copy_table(snapshot.actor_palette)
+  local function apply_snapshot(target)
+    if target and target.subtitles then
+      state.subtitles = deep_copy_subtitles(target.subtitles)
+      if target.actor_palette then state.actor_palette = deep_copy_table(target.actor_palette) end
+      if target.selected_actors then state.selected_actors = deep_copy_table(target.selected_actors) end
+      state.filename = target.filename
+      state.filepath = target.filepath
+      if #state.subtitles == 0 and actions and actions.clear_regions then
+        actions.clear_regions()
+      elseif target.regions_displayed == false and actions and actions.clear_regions then
+        actions.clear_regions()
+      end
+    elseif cur_step <= 1 then
+      state.subtitles = {}
+      state.filename = nil
+      state.filepath = nil
+      state.selected_actors = {}
+      if actions and actions.clear_regions then
+        actions.clear_regions()
+      end
+    end
   end
-  if snapshot.selected_actors then
-    state.selected_actors = deep_copy_table(snapshot.selected_actors)
-  end
-  if snapshot.default_region_color ~= nil then
-    state.default_region_color = snapshot.default_region_color and { snapshot.default_region_color[1], snapshot.default_region_color[2], snapshot.default_region_color[3] }
+
+  if cur_step < prev_step then
+    local target = state.undo_history[cur_step]
+    if target and target.subtitles then
+      apply_snapshot(target)
+    else
+      -- UNDO: Roll backwards from prev_step down to cur_step + 1 via deltas
+      for s = prev_step, cur_step + 1, -1 do
+        local rec = state.undo_history[s]
+        if rec and rec.delta then
+          local d = rec.delta
+          if d.type == "insert" then
+            if d.idx and d.idx >= 1 and d.idx <= #state.subtitles then
+              table.remove(state.subtitles, d.idx)
+            end
+            if actions and actions.timeline_sync and actions.timeline_sync.sub_map and d.idx and d.idx >= 1 and d.idx <= #actions.timeline_sync.sub_map then
+              table.remove(actions.timeline_sync.sub_map, d.idx)
+            end
+          elseif d.type == "delete" then
+            if d.idx and d.sub then
+              table.insert(state.subtitles, math.min(d.idx, #state.subtitles + 1), d.sub)
+              state.prepare_sub_props(d.sub)
+            end
+          end
+        elseif rec and rec.subtitles then
+          apply_snapshot(rec)
+        end
+      end
+      if cur_step <= 1 and #state.subtitles == 0 and actions and actions.clear_regions then
+        actions.clear_regions()
+      end
+    end
+  elseif cur_step > prev_step then
+    local target = state.undo_history[cur_step]
+    if target and target.subtitles then
+      apply_snapshot(target)
+    else
+      -- REDO: Roll forward from prev_step + 1 up to cur_step via deltas
+      for s = prev_step + 1, cur_step do
+        local rec = state.undo_history[s]
+        if rec and rec.delta then
+          local d = rec.delta
+          if d.type == "insert" then
+            if d.idx and d.sub then
+              table.insert(state.subtitles, math.min(d.idx, #state.subtitles + 1), d.sub)
+              state.prepare_sub_props(d.sub)
+            end
+          elseif d.type == "delete" then
+            if d.idx and d.idx >= 1 and d.idx <= #state.subtitles then
+              table.remove(state.subtitles, d.idx)
+            end
+            if actions and actions.timeline_sync and actions.timeline_sync.sub_map and d.idx and d.idx >= 1 and d.idx <= #actions.timeline_sync.sub_map then
+              table.remove(actions.timeline_sync.sub_map, d.idx)
+            end
+          end
+        elseif rec and rec.subtitles then
+          state.subtitles = deep_copy_subtitles(rec.subtitles)
+          if rec.actor_palette then state.actor_palette = deep_copy_table(rec.actor_palette) end
+          if rec.selected_actors then state.selected_actors = deep_copy_table(rec.selected_actors) end
+          state.filename = rec.filename
+          state.filepath = rec.filepath
+        end
+      end
+    end
   end
 
   state.current_step_id = cur_step
   state.row_heights = {}
+  state.user_selected_row_idx = nil
+  state.selected_real_sub_idx = nil
   state.active_sub_idx = nil
   state.last_centered_idx = -1
   state.refresh_actors_from_subtitles()
@@ -622,34 +752,29 @@ function state.check_reaper_undo_sync(actions)
     if ok_act then actions = act_mod end
   end
 
-  if actions then
-    local filtered = state.get_filtered_subtitles()
-    if snapshot.regions_displayed ~= nil then
-      if snapshot.regions_displayed then
-        actions.set_regions(filtered, state.actor_palette, state)
-      else
-        actions.clear_regions()
-      end
-    else
-      actions.sync_filter_to_timeline(state)
-    end
-
-    if snapshot.items_displayed ~= nil then
-      if snapshot.items_displayed then
-        actions.create_items(filtered, state.actor_palette, state)
-      else
-        actions.clear_subtitle_track()
-      end
-    end
+  if actions and actions.ensure_regions_synced then
+    actions.ensure_regions_synced(state)
+  elseif actions and actions.init_timeline_sync then
     actions.init_timeline_sync(state)
   end
 
-  state.save_to_project()
+  if reaper.UpdateTimeline then reaper.UpdateTimeline() end
+  if reaper.UpdateArrange then reaper.UpdateArrange() end
+
+  state.save_to_project(state.last_proj)
   return true
 end
 
 -- Perform REAPER Native Undo (Ctrl+Z)
 function state.undo(actions)
+  if not actions then
+    local ok_act, act_mod = pcall(require, 'actions')
+    if ok_act then actions = act_mod end
+  end
+  if actions and actions.timeline_sync then
+    actions.timeline_sync.drag_active = false
+    actions.timeline_sync.suppress_until = (reaper.time_precise and reaper.time_precise() or os.clock()) + 0.4
+  end
   if reaper and reaper.Undo_DoUndo2 then
     local res = reaper.Undo_DoUndo2(0)
     if res ~= 0 then
@@ -662,6 +787,14 @@ end
 
 -- Perform REAPER Native Redo (Ctrl+Shift+Z / Ctrl+Y)
 function state.redo(actions)
+  if not actions then
+    local ok_act, act_mod = pcall(require, 'actions')
+    if ok_act then actions = act_mod end
+  end
+  if actions and actions.timeline_sync then
+    actions.timeline_sync.drag_active = false
+    actions.timeline_sync.suppress_until = (reaper.time_precise and reaper.time_precise() or os.clock()) + 0.4
+  end
   if reaper and reaper.Undo_DoRedo2 then
     local res = reaper.Undo_DoRedo2(0)
     if res ~= 0 then
@@ -722,14 +855,27 @@ function state.refresh_actors_from_subtitles()
   end
 end
 
--- Update subtitle at index (Undoable)
+-- Invalidate cached layout or virtual calculations
+function state.invalidate_virtual_cache()
+  state.row_heights = {}
+  state._virtual_cache = nil
+end
+
+-- Update subtitle at index (Undoable - disabled in focus mode)
 function state.update_subtitle(idx, new_sub)
+  if state.focus_mode then return false end
   if state.subtitles[idx] then
     local old_snap = state.capture_snapshot("Изменить строку #" .. idx)
     if new_sub.text then
       new_sub.text = parser.strip_invisible_unicode(new_sub.text)
     end
+    new_sub.single_line = nil
+    new_sub.char_cnt = nil
+    new_sub.cps = nil
     state.subtitles[idx] = new_sub
+    if state.invalidate_virtual_cache then
+      state.invalidate_virtual_cache()
+    end
     state.row_heights = {}
     state.refresh_actors_from_subtitles()
     state.push_undo("Изменить строку #" .. idx, old_snap)
@@ -737,29 +883,125 @@ function state.update_subtitle(idx, new_sub)
   end
 end
 
--- Delete subtitle at index (Undoable)
-function state.delete_subtitle(idx)
+-- Delete subtitle at index (Undoable with Delta - disabled in focus mode)
+-- jump_to_next: if true (Ctrl+Delete), jumps playback timing position to next subtitle
+--               if false/nil (regular Delete), leaves playback timing unchanged and naturally centers next subtitle
+function state.delete_subtitle(idx, jump_to_next)
+  if state.focus_mode then return false end
+
+  local now_p = (reaper and reaper.time_precise and reaper.time_precise()) or os.clock()
+  if state._last_delete_call_time and (now_p - state._last_delete_call_time) < 0.20 then
+    return false
+  end
+  state._last_delete_call_time = now_p
+
   if state.subtitles[idx] then
-    local old_snap = state.capture_snapshot("Удалить строку #" .. idx)
+    local old_snap = state.capture_snapshot and state.capture_snapshot("Удалить строку #" .. idx)
+    local sub_to_delete = state.subtitles[idx]
+    local del_start = sub_to_delete.start_time
+    local del_end = sub_to_delete.end_time
+    local delta = { type = "delete", idx = idx, sub = sub_to_delete }
+
+    local filtered_before = state.get_filtered_subtitles()
+    local del_filtered_idx = nil
+    for fi, fs in ipairs(filtered_before) do
+      if fs == sub_to_delete then
+        del_filtered_idx = fi
+        break
+      end
+    end
+
     table.remove(state.subtitles, idx)
-    state.row_heights = {}
-    local filtered = state.get_filtered_subtitles()
-    if #filtered > 0 then
-      state.active_sub_idx = math.min(state.active_sub_idx or 1, #filtered)
-      state.selected_real_sub_idx = state.find_subtitle_index(filtered[state.active_sub_idx])
+
+    -- Remove row height of deleted subtitle and shift subsequent cached heights down by 1
+    if state.row_heights and del_filtered_idx then
+      local new_rh = {}
+      for k, v in pairs(state.row_heights) do
+        if type(k) == "number" then
+          if k < del_filtered_idx then
+            new_rh[k] = v
+          elseif k > del_filtered_idx then
+            new_rh[k - 1] = v
+          end
+        end
+      end
+      state.row_heights = new_rh
+    else
+      state.row_heights = {}
+    end
+
+    local total_subs = #state.subtitles
+    if total_subs > 0 then
+      -- Next subtitle now occupies index `idx` (or last index if deleted sub was the final one)
+      local target_real_idx = math.min(idx, total_subs)
+      local next_sub = state.subtitles[target_real_idx]
+
+      local filtered = state.get_filtered_subtitles()
+      local target_filtered_idx = 1
+      for fi, fs in ipairs(filtered) do
+        if fs == next_sub then
+          target_filtered_idx = fi
+          break
+        end
+      end
+
+      if jump_to_next then
+        -- Ctrl+Delete: Jump playback timing position in REAPER to next subtitle
+        state.user_selected_row_idx = target_real_idx
+        state.selected_real_sub_idx = target_real_idx
+        state.active_sub_idx = target_filtered_idx
+        state.last_centered_idx = -1
+        state.need_calc_scroll_target = true
+        state.suppress_autoscroll_until = 0
+        state.scroll_target_y = nil
+
+        local is_playing = reaper and reaper.GetPlayState and ((reaper.GetPlayState() & 1) ~= 0)
+        if not is_playing and next_sub and next_sub.start_time then
+          local ok_act, actions = pcall(require, 'actions')
+          if ok_act and actions and actions.jump_to_time then
+            actions.jump_to_time(next_sub.start_time)
+          end
+        end
+      else
+        -- Regular Delete: Do NOT jump playback timing position!
+        -- Cursor position remains untouched; clear user selection so next row must be clicked before deleting again
+        state.user_selected_row_idx = nil
+        state.selected_real_sub_idx = nil
+        state.active_sub_idx = target_filtered_idx
+        state.last_centered_idx = -1
+        state.need_calc_scroll_target = true
+        state.suppress_autoscroll_until = 0
+        state.scroll_target_y = nil
+      end
     else
       state.active_sub_idx = nil
+      state.user_selected_row_idx = nil
       state.selected_real_sub_idx = nil
+      state.need_calc_scroll_target = false
+      state.scroll_target_y = 0.0
     end
     state.last_centered_idx = -1
-    state.refresh_actors_from_subtitles()
-    state.push_undo("Удалить строку #" .. idx, old_snap)
-    state.save_to_project()
+
+    if state.actor_counts and sub_to_delete.actor then
+      state.actor_counts[sub_to_delete.actor] = math.max(0, (state.actor_counts[sub_to_delete.actor] or 1) - 1)
+    else
+      state.refresh_actors_from_subtitles()
+    end
+
+    local ok_act, actions = pcall(require, 'actions')
+    local on_commit = function()
+      if ok_act and actions and actions.delete_single_timeline_item then
+        actions.delete_single_timeline_item(state, idx)
+      end
+    end
+    state.push_undo("Удалить строку #" .. idx, old_snap, on_commit, delta)
+    state.mark_save_to_project_dirty(0.4)
   end
 end
 
-function state.delete_subtitle_with_undo(idx)
-  state.delete_subtitle(idx)
+function state.delete_subtitle_with_undo(idx, jump_to_next)
+  if state.focus_mode then return false end
+  state.delete_subtitle(idx, jump_to_next)
 end
 
 -- Insert new subtitle into state.subtitles in chronological order (Undoable)
@@ -771,8 +1013,6 @@ function state.add_subtitle_with_undo(start_time, end_time, raw_actor, text, ski
   if end_time - start_time < 0.05 then
     end_time = start_time + 1.0
   end
-
-  local old_snap = not skip_undo and state.capture_snapshot("Создать субтитр")
 
   raw_actor = (raw_actor and #raw_actor > 0) and raw_actor or "NoActor"
   text = text or ""
@@ -788,38 +1028,81 @@ function state.add_subtitle_with_undo(start_time, end_time, raw_actor, text, ski
     text = parser.strip_invisible_unicode(text)
   }
 
-  -- Insert chronologically sorted
+  local old_snap = state.capture_snapshot and state.capture_snapshot("До создания субтитра")
+
+  -- Fast binary search for chronological insertion position O(log N)
+  local low = 1
+  local high = #state.subtitles
   local insert_idx = #state.subtitles + 1
-  for i, s in ipairs(state.subtitles) do
-    if s.start_time > start_time then
-      insert_idx = i
-      break
+  while low <= high do
+    local mid = (low + high) // 2
+    if state.subtitles[mid].start_time > start_time then
+      insert_idx = mid
+      high = mid - 1
+    else
+      low = mid + 1
     end
   end
 
   table.insert(state.subtitles, insert_idx, new_sub)
 
-  state.row_heights = {}
-  state.selected_real_sub_idx = insert_idx
-  local filtered = state.get_filtered_subtitles()
-  for fi, fs in ipairs(filtered) do
-    if fs == new_sub then
-      state.active_sub_idx = fi
-      break
+  -- Shift cached row heights for subsequent rows without wiping measurements
+  if state.row_heights then
+    local new_rh = {}
+    for k, v in pairs(state.row_heights) do
+      if type(k) == "number" then
+        if k < insert_idx then
+          new_rh[k] = v
+        else
+          new_rh[k + 1] = v
+        end
+      end
+    end
+    new_rh[insert_idx] = 32.0
+    state.row_heights = new_rh
+  end
+
+  -- Keep user selection and active sub pointing to the same sub without jumping scroll
+  if state.user_selected_row_idx and state.user_selected_row_idx >= insert_idx then
+    state.user_selected_row_idx = state.user_selected_row_idx + 1
+  end
+  if state.selected_real_sub_idx and state.selected_real_sub_idx >= insert_idx then
+    state.selected_real_sub_idx = state.selected_real_sub_idx + 1
+  end
+  if state.active_sub_idx and state.active_sub_idx >= insert_idx then
+    state.active_sub_idx = state.active_sub_idx + 1
+  end
+
+  -- Incremental actor registration (avoids full O(N) scan of 3500+ subs)
+  if not state.actor_counts or not state.actors then
+    state.refresh_actors_from_subtitles()
+  else
+    local a_name = display_actor or "NoActor"
+    state.actor_counts[a_name] = (state.actor_counts[a_name] or 0) + 1
+    if not state.actors_set or not state.actors_set[a_name] then
+      state.refresh_actors_from_subtitles()
     end
   end
-  state.refresh_actors_from_subtitles()
-  state.refresh_filter_set()
+
+  state.prepare_sub_props(new_sub)
   if not skip_undo then
-    state.push_undo("Создать субтитр #" .. insert_idx, old_snap)
+    local ok_act, actions = pcall(require, 'actions')
+    local on_commit = function()
+      if ok_act and actions and actions.add_single_timeline_item then
+        actions.add_single_timeline_item(state, insert_idx)
+      end
+    end
+    local delta = { type = "insert", idx = insert_idx, sub = new_sub }
+    state.push_undo("Создать субтитр #" .. insert_idx, old_snap, on_commit, delta)
   end
-  state.save_to_project()
+  state.mark_save_to_project_dirty(0.4)
 
   return insert_idx, new_sub
 end
 
--- Change actor for a single subtitle line (Undoable)
+-- Change actor for a single subtitle line (Undoable - disabled in focus mode)
 function state.change_subtitle_actor_with_undo(idx, new_actor)
+  if state.focus_mode then return false end
   local sub = state.subtitles[idx]
   if not sub then return false end
 
@@ -1105,19 +1388,38 @@ function state.get_settings_table()
     text_active_spacing = state.text_active_spacing,
     text_active_spacing_px = state.text_active_spacing_px,
     text_highlight_brightness = state.text_highlight_brightness,
+    text_fixed_lead_in = state.text_fixed_lead_in,
     text_lead_in_time = state.text_lead_in_time,
     smooth_scroll_enabled = state.smooth_scroll_enabled,
     smooth_scroll_speed = state.smooth_scroll_speed,
     row_alternating_bg = state.row_alternating_bg,
     row_alternating_strength = state.row_alternating_strength,
     text_preview_collapsed = state.text_preview_collapsed,
+    -- View mode settings
+    view_mode = state.view_mode,
+    note_auto_wrap = state.note_auto_wrap,
+    note_min_font_size = state.note_min_font_size,
+    note_max_font_size = state.note_max_font_size,
+    note_show_actor = state.note_show_actor,
+    note_show_progress = state.note_show_progress,
+    note_edit_font_size = state.note_edit_font_size,
     -- General & Accent settings
     accent_color = state.accent_color,
+    parse_srt_actors = state.parse_srt_actors,
+    intercept_reaper_file_drop = state.intercept_reaper_file_drop,
     default_region_color = state.default_region_color,
     control_box_palette = state.control_box_palette,
     watermark_style = state.watermark_style,
+    regions_enabled = (state.regions_enabled ~= false),
     -- Overlay settings
     overlay_enabled = state.overlay_enabled,
+    timer_overlay_enabled = state.timer_overlay_enabled,
+    timer_overlay_font_family = state.timer_overlay_font_family,
+    timer_overlay_format = state.timer_overlay_format,
+    timer_overlay_color_mode = state.timer_overlay_color_mode,
+    timer_custom_color = state.timer_custom_color,
+    timer_overlay_bg_alpha = state.timer_overlay_bg_alpha,
+    timer_overlay_bg_color = state.timer_overlay_bg_color,
     overlay_always_on_top = state.overlay_always_on_top,
     overlay_bg_alpha = state.overlay_bg_alpha,
     overlay_bg_color = state.overlay_bg_color,
@@ -1138,6 +1440,17 @@ function state.get_settings_table()
     overlay_show_all_actors = state.overlay_show_all_actors,
     overlay_tint_lines = state.overlay_tint_lines,
     overlay_tint_only_filtered = state.overlay_tint_only_filtered,
+    text_show_cps = state.text_show_cps,
+    text_sync_overlay_hold = state.text_sync_overlay_hold,
+    overlay_hold_mode = state.overlay_hold_mode,
+    overlay_target_cps = state.overlay_target_cps,
+    overlay_max_hold = state.overlay_max_hold,
+    overlay_max_drift = state.overlay_max_drift,
+    overlay_show_drift_badge = state.overlay_show_drift_badge,
+    -- Optimization settings
+    timeline_streaming_enabled = state.timeline_streaming_enabled,
+    timeline_streaming_radius_min = state.timeline_streaming_radius_min,
+    timeline_streaming_min_subs = state.timeline_streaming_min_subs,
     -- UI scale settings
     ui_font_size = state.ui_font_size,
     tooltip_font_size = state.tooltip_font_size,
@@ -1166,6 +1479,10 @@ function state.apply_settings_table(s)
     end
   end
 
+  if s.timeline_streaming_enabled ~= nil then state.timeline_streaming_enabled = s.timeline_streaming_enabled end
+  if s.timeline_streaming_radius_min ~= nil then state.timeline_streaming_radius_min = s.timeline_streaming_radius_min end
+  if s.timeline_streaming_min_subs ~= nil then state.timeline_streaming_min_subs = s.timeline_streaming_min_subs end
+
   if s.text_font_family ~= nil then state.text_font_family = s.text_font_family end
   if s.text_font_size ~= nil then state.text_font_size = s.text_font_size end
   if s.scroll_center_ratio ~= nil then state.scroll_center_ratio = s.scroll_center_ratio end
@@ -1174,18 +1491,46 @@ function state.apply_settings_table(s)
   if s.text_active_spacing ~= nil then state.text_active_spacing = s.text_active_spacing end
   if s.text_active_spacing_px ~= nil then state.text_active_spacing_px = s.text_active_spacing_px end
   if s.text_highlight_brightness ~= nil then state.text_highlight_brightness = s.text_highlight_brightness end
+  if s.text_fixed_lead_in ~= nil then state.text_fixed_lead_in = s.text_fixed_lead_in end
   if s.text_lead_in_time ~= nil then state.text_lead_in_time = s.text_lead_in_time end
   if s.smooth_scroll_enabled ~= nil then state.smooth_scroll_enabled = s.smooth_scroll_enabled end
   if s.smooth_scroll_speed ~= nil then state.smooth_scroll_speed = s.smooth_scroll_speed end
   if s.row_alternating_bg ~= nil then state.row_alternating_bg = s.row_alternating_bg end
   if s.row_alternating_strength ~= nil then state.row_alternating_strength = s.row_alternating_strength end
   if s.text_preview_collapsed ~= nil then state.text_preview_collapsed = s.text_preview_collapsed end
+  if s.view_mode ~= nil then state.view_mode = s.view_mode end
+  if s.note_auto_wrap ~= nil then state.note_auto_wrap = s.note_auto_wrap end
+  if s.note_min_font_size ~= nil then state.note_min_font_size = s.note_min_font_size end
+  if s.note_max_font_size ~= nil then state.note_max_font_size = s.note_max_font_size end
+  if s.note_show_actor ~= nil then state.note_show_actor = s.note_show_actor end
+  if s.note_show_progress ~= nil then state.note_show_progress = s.note_show_progress end
+  if s.note_edit_font_size ~= nil then state.note_edit_font_size = s.note_edit_font_size end
+  if s.parse_srt_actors ~= nil then
+    state.parse_srt_actors = s.parse_srt_actors
+  elseif s.smart_srt_actors ~= nil then
+    state.parse_srt_actors = s.smart_srt_actors
+  else
+    state.parse_srt_actors = true
+  end
+  if s.intercept_reaper_file_drop ~= nil then
+    state.intercept_reaper_file_drop = s.intercept_reaper_file_drop
+  else
+    state.intercept_reaper_file_drop = true
+  end
   if s.accent_color then state.accent_color = s.accent_color end
   if s.default_region_color ~= nil then state.default_region_color = s.default_region_color end
   if s.control_box_palette ~= nil then state.control_box_palette = s.control_box_palette end
   if s.watermark_style ~= nil then state.watermark_style = s.watermark_style end
+  if s.regions_enabled ~= nil then state.regions_enabled = s.regions_enabled end
 
   if s.overlay_enabled ~= nil then state.overlay_enabled = s.overlay_enabled end
+  if s.timer_overlay_enabled ~= nil then state.timer_overlay_enabled = s.timer_overlay_enabled end
+  if s.timer_overlay_font_family then state.timer_overlay_font_family = s.timer_overlay_font_family end
+  if s.timer_overlay_format ~= nil then state.timer_overlay_format = s.timer_overlay_format end
+  if s.timer_overlay_color_mode ~= nil then state.timer_overlay_color_mode = s.timer_overlay_color_mode end
+  if s.timer_custom_color then state.timer_custom_color = s.timer_custom_color end
+  if s.timer_overlay_bg_alpha ~= nil then state.timer_overlay_bg_alpha = s.timer_overlay_bg_alpha end
+  if s.timer_overlay_bg_color then state.timer_overlay_bg_color = s.timer_overlay_bg_color end
   if s.overlay_always_on_top ~= nil then state.overlay_always_on_top = s.overlay_always_on_top end
   if s.overlay_bg_alpha ~= nil then state.overlay_bg_alpha = s.overlay_bg_alpha end
   if s.overlay_bg_color then state.overlay_bg_color = s.overlay_bg_color end
@@ -1206,22 +1551,44 @@ function state.apply_settings_table(s)
   if s.overlay_show_all_actors ~= nil then state.overlay_show_all_actors = s.overlay_show_all_actors end
   if s.overlay_tint_lines ~= nil then state.overlay_tint_lines = s.overlay_tint_lines end
   if s.overlay_tint_only_filtered ~= nil then state.overlay_tint_only_filtered = s.overlay_tint_only_filtered end
+  if s.text_show_cps ~= nil then state.text_show_cps = s.text_show_cps end
+  if s.text_sync_overlay_hold ~= nil then state.text_sync_overlay_hold = s.text_sync_overlay_hold else state.text_sync_overlay_hold = true end
+  if s.overlay_hold_mode ~= nil then state.overlay_hold_mode = s.overlay_hold_mode end
+  if s.overlay_target_cps ~= nil then state.overlay_target_cps = s.overlay_target_cps end
+  if s.overlay_max_hold ~= nil then state.overlay_max_hold = s.overlay_max_hold end
+  if s.overlay_max_drift ~= nil then state.overlay_max_drift = s.overlay_max_drift end
+  if s.overlay_show_drift_badge ~= nil then state.overlay_show_drift_badge = s.overlay_show_drift_badge end
 
   if s.ui_font_size ~= nil then state.ui_font_size = s.ui_font_size end
   if s.tooltip_font_size ~= nil then state.tooltip_font_size = s.tooltip_font_size end
   if s.popup_font_size ~= nil then state.popup_font_size = s.popup_font_size end
 end
 
+-- Validate if a ReaProject pointer is currently open and alive in REAPER
+function state.is_project_valid(target_proj)
+  if not reaper or not reaper.EnumProjects or not target_proj or target_proj == 0 then return false end
+  local i = 0
+  while true do
+    local p = reaper.EnumProjects(i)
+    if not p then break end
+    if p == target_proj then return true end
+    i = i + 1
+  end
+  return false
+end
+
 -- Save settings both to reaper-extstate.ini (globally across sessions) and to project
-function state.save_settings()
+function state.save_settings(target_proj)
+  local cur_proj = (reaper and reaper.EnumProjects and reaper.EnumProjects(-1))
+  local proj = target_proj or cur_proj
   local settings = state.get_settings_table()
   local encoded = json.encode(settings)
   if reaper then
     if reaper.SetExtState then
-      reaper.SetExtState(EXT_SECTION, "GLOBAL_SETTINGS", encoded, true)
+      pcall(reaper.SetExtState, EXT_SECTION, "GLOBAL_SETTINGS", encoded, true)
     end
-    if reaper.SetProjExtState then
-      reaper.SetProjExtState(0, EXT_SECTION, "SETTINGS", encoded)
+    if reaper.SetProjExtState and proj and state.is_project_valid(proj) then
+      pcall(reaper.SetProjExtState, proj, EXT_SECTION, "SETTINGS", encoded)
     end
   end
 end
@@ -1242,54 +1609,68 @@ function state.load_global_settings()
 end
 
 -- Save current state to REAPER active project
-function state.save_to_project()
-  if not reaper or not reaper.SetProjExtState then return end
+function state.save_to_project(target_proj)
+  if not reaper or not reaper.SetProjExtState then return false end
+  local cur_proj = (reaper.EnumProjects and reaper.EnumProjects(-1))
+  local proj = target_proj or cur_proj
+  if not proj or not state.is_project_valid(proj) then return false end
+
+  -- Safety guard: never save if project has no subtitles and no file was ever loaded
+  if not state.subtitles and not state.filename and not state.filepath then
+    return false
+  end
 
   local meta = {
     filename = state.filename,
     filepath = state.filepath,
     format = state.format,
-    count = #state.subtitles
+    count = state.subtitles and #state.subtitles or 0
   }
-  reaper.SetProjExtState(0, EXT_SECTION, "META", json.encode(meta))
+  pcall(reaper.SetProjExtState, proj, EXT_SECTION, "META", json.encode(meta))
 
   -- Subtitles
-  reaper.SetProjExtState(0, EXT_SECTION, "SUBTITLES", json.encode(state.subtitles))
+  pcall(reaper.SetProjExtState, proj, EXT_SECTION, "SUBTITLES", json.encode(state.subtitles or {}))
 
   -- Actors & Palette
   local actors_save = {
-    actors = state.actors,
-    actor_counts = state.actor_counts,
-    actor_palette = state.actor_palette
+    actors = state.actors or {},
+    actor_counts = state.actor_counts or {},
+    actor_palette = state.actor_palette or {}
   }
-  reaper.SetProjExtState(0, EXT_SECTION, "ACTORS", json.encode(actors_save))
+  pcall(reaper.SetProjExtState, proj, EXT_SECTION, "ACTORS", json.encode(actors_save))
 
   -- Persist actor filter for this project
-  reaper.SetProjExtState(0, EXT_SECTION, "FILTER_ACTORS", json.encode(state.selected_actors or {}))
+  pcall(reaper.SetProjExtState, proj, EXT_SECTION, "FILTER_ACTORS", json.encode(state.selected_actors or {}))
 
   -- Persist settings globally and in project
-  state.save_settings()
+  state.save_settings(proj)
 
   -- Mark REAPER project dirty so Ctrl+S / save prompt includes plugin state changes
   if reaper.MarkProjectDirty then
-    pcall(reaper.MarkProjectDirty, 0)
+    pcall(reaper.MarkProjectDirty, proj)
   end
+  return true
 end
 
 -- Load state from REAPER active project
-function state.load_from_project()
+function state.load_from_project(target_proj)
   -- Always restore global settings first so user preferences are intact
   state.load_global_settings()
 
   if not reaper or not reaper.GetProjExtState then return false end
+  local cur_proj = (reaper.EnumProjects and reaper.EnumProjects(-1))
+  local proj = target_proj or cur_proj
+  if not proj or not state.is_project_valid(proj) then return false end
 
-  local _, meta_str = reaper.GetProjExtState(0, EXT_SECTION, "META")
+  local meta_str
+  local p_ok, _, res = pcall(reaper.GetProjExtState, proj, EXT_SECTION, "META")
+  if p_ok then meta_str = res end
   local sec_to_use = EXT_SECTION
   if not meta_str or #meta_str == 0 then
     -- Fallback to legacy project state
-    local _, leg_meta = reaper.GetProjExtState(0, LEGACY_EXT_SECTION, "META")
-    if leg_meta and #leg_meta > 0 then
-      meta_str = leg_meta
+    local leg_ok, _, leg_res = pcall(reaper.GetProjExtState, proj, LEGACY_EXT_SECTION, "META")
+    if leg_ok and leg_res and #leg_res > 0 then
+      meta_str = leg_res
       sec_to_use = LEGACY_EXT_SECTION
     end
   end
@@ -1315,19 +1696,21 @@ function state.load_from_project()
     state.format = meta.format
   end
 
-  local _, subs_str = reaper.GetProjExtState(0, sec_to_use, "SUBTITLES")
+  local subs_str
+  local s_ok, _, s_res = pcall(reaper.GetProjExtState, proj, sec_to_use, "SUBTITLES")
+  if s_ok then subs_str = s_res end
   if subs_str and #subs_str > 0 then
     state.subtitles = json.decode(subs_str) or {}
-    for _, s in ipairs(state.subtitles) do
-      if s.text then
-        s.text = parser.strip_invisible_unicode(s.text)
-      end
+    if #state.subtitles > 1 and parser and parser.sort_subtitles then
+      parser.sort_subtitles(state.subtitles)
     end
   else
     state.subtitles = {}
   end
 
-  local _, actors_str = reaper.GetProjExtState(0, sec_to_use, "ACTORS")
+  local actors_str
+  local a_ok, _, a_res = pcall(reaper.GetProjExtState, proj, sec_to_use, "ACTORS")
+  if a_ok then actors_str = a_res end
   if actors_str and #actors_str > 0 then
     local actors_data = json.decode(actors_str)
     if actors_data then
@@ -1338,13 +1721,15 @@ function state.load_from_project()
   end
 
   -- Load per-project actor filter
-  local _, filter_actors_str = reaper.GetProjExtState(0, sec_to_use, "FILTER_ACTORS")
+  local filter_actors_str
+  local f_ok, _, f_res = pcall(reaper.GetProjExtState, proj, sec_to_use, "FILTER_ACTORS")
+  if f_ok then filter_actors_str = f_res end
   if filter_actors_str and #filter_actors_str > 0 then
     state.selected_actors = json.decode(filter_actors_str) or {}
   else
-    local _, settings_str = reaper.GetProjExtState(0, EXT_SECTION, "SETTINGS")
-    if settings_str and #settings_str > 0 then
-      local s = json.decode(settings_str)
+    local set_ok, _, set_res = pcall(reaper.GetProjExtState, proj, EXT_SECTION, "SETTINGS")
+    if set_ok and set_res and #set_res > 0 then
+      local s = json.decode(set_res)
       if s and s.selected_actors then
         state.selected_actors = s.selected_actors
       end
@@ -1357,8 +1742,39 @@ function state.load_from_project()
 end
 
 -- Load from a file path (Undoable)
+-- Helper to lazily prepare a subtitle's single_line, char_cnt, and cps properties
+function state.prepare_sub_props(s)
+  if not s then return end
+  s.single_line = (s.text or ""):gsub("[\r\n]+", " ")
+  s.char_cnt = (parser and parser.utf8_len and parser.utf8_len(s.single_line)) or (utf8 and utf8.len and utf8.len(s.single_line)) or #s.single_line
+  local dur = math.max(0.001, (s.end_time or 0) - (s.start_time or 0))
+  s.cps = s.char_cnt / dur
+end
+
+-- Debounced project state saver to prevent UI freezes when adding or deleting subtitles
+function state.mark_save_to_project_dirty(delay_sec)
+  delay_sec = delay_sec or 0.5
+  local now_t = (reaper and reaper.time_precise and reaper.time_precise()) or os.clock()
+  state._save_project_pending_until = now_t + delay_sec
+  state._save_project_target_proj = state.last_proj or 0
+end
+
+function state.check_pending_save()
+  if state._save_project_pending_until then
+    local now_t = (reaper and reaper.time_precise and reaper.time_precise()) or os.clock()
+    if now_t >= state._save_project_pending_until then
+      local target = state._save_project_target_proj
+      state._save_project_pending_until = nil
+      state._save_project_target_proj = nil
+      if target and state.is_project_valid(target) then
+        state.save_to_project(target)
+      end
+    end
+  end
+end
+
 function state.load_file(filepath)
-  local res = parser.parse_file(filepath)
+  local res = parser.parse_file(filepath, { parse_srt_actors = (state.parse_srt_actors ~= false) })
   if not res or not res.ok then
     return false, res and res.error or "Unknown parse error"
   end
@@ -1370,11 +1786,6 @@ function state.load_file(filepath)
   state.filename = res.filename
   state.format = res.format
   state.subtitles = res.subtitles
-  for _, s in ipairs(state.subtitles) do
-    if s.text then
-      s.text = parser.strip_invisible_unicode(s.text)
-    end
-  end
   state.actors = res.actors
   state.actor_counts = res.actor_counts
 
@@ -1387,78 +1798,167 @@ function state.load_file(filepath)
   state.active_sub_idx = nil
   state.row_heights = {}
 
-  -- Push native undo point for loading the file
+  -- Push native undo point for loading the file (timeline sync is committed inside the undo block!)
   if state.push_undo then
-    state.push_undo("Загрузить файл " .. (res.filename or "субтитров"), old_snap)
+    local on_commit = function()
+      local ok_act, actions = pcall(require, 'actions')
+      if ok_act and actions and actions.sync_filter_to_timeline then
+        actions.sync_filter_to_timeline(state)
+      end
+    end
+    state.push_undo("Загрузить файл " .. (res.filename or "субтитров"), old_snap, on_commit)
   end
 
   -- Save to current project
   state.save_to_project()
 
   local actions_ok, actions = pcall(require, 'actions')
-  if actions_ok and actions then
-    if actions.sync_filter_to_timeline then
-      actions.sync_filter_to_timeline(state)
-    end
-    if actions.init_timeline_sync then
-      actions.init_timeline_sync(state)
-    end
+  if actions_ok and actions and actions.init_timeline_sync then
+    actions.init_timeline_sync(state)
   end
 
   return true
 end
 
 -- Detect if active project changed (e.g. project tab switch or Recent/Open project in current tab)
-function state.check_project_changed()
+function state.check_project_changed(actions)
   if not reaper or not reaper.EnumProjects then return false end
   local cur_proj, cur_projfn = reaper.EnumProjects(-1)
-  local proj_token = string.format("%s|%s", tostring(cur_proj), tostring(cur_projfn or ""))
+  if not cur_proj then return false end
 
-  if proj_token ~= state.last_proj_token then
-    -- Cache previous project tab's undo history before switching tabs
-    if state.last_proj_token and state._projects_cache then
-      state._projects_cache[state.last_proj_token] = {
-        undo_history = state.undo_history,
-        current_step_id = state.current_step_id,
-        next_step_id = state.next_step_id
-      }
-    end
-
-    state.last_proj_token = proj_token
+  -- First run initialization
+  if state.last_proj == nil then
     state.last_proj = cur_proj
     state.last_projfn = cur_projfn
-
-    state.load_from_project()
-
-    -- Restore cached undo history for this project tab if it exists
-    local cached = state._projects_cache and state._projects_cache[proj_token]
-    if cached and cached.undo_history and next(cached.undo_history) then
-      state.undo_history = cached.undo_history
-      state.current_step_id = cached.current_step_id
-      state.next_step_id = cached.next_step_id
-    else
-      state.undo_history = {}
-      state.current_step_id = nil
-      state.init_undo_tracking()
-    end
-
-    local actions_ok, actions = pcall(require, 'actions')
-    if actions_ok and actions then
-      if actions.init_timeline_sync then
-        actions.init_timeline_sync(state)
-      end
-      if actions.sync_filter_to_timeline then
-        actions.sync_filter_to_timeline(state)
-      end
-    end
-
-    state.row_heights = {}
-    state.undo_stack = {}
-    state.active_sub_idx = nil
-    state.need_calc_scroll_target = true
-    return true
+    state.last_proj_key = tostring(cur_proj)
+    state._projects_cache = state._projects_cache or {}
+    return false
   end
-  return false
+
+  -- If same project pointer, just check if filename updated (e.g. user saved untitled project to disk)
+  if cur_proj == state.last_proj then
+    if cur_projfn ~= state.last_projfn then
+      state.last_projfn = cur_projfn
+    end
+    return false
+  end
+
+  -- REAL TAB SWITCH DETECTED:
+  local prev_proj = state.last_proj
+  local prev_key = state.last_proj_key or tostring(prev_proj)
+  local prev_is_alive = state.is_project_valid(prev_proj)
+
+  if prev_is_alive then
+    -- 1. Flush any pending save for previous project immediately to prev_proj
+    if state._save_project_pending_until then
+      state._save_project_pending_until = nil
+      state._save_project_target_proj = nil
+      state.save_to_project(prev_proj)
+    elseif state.subtitles and #state.subtitles > 0 then
+      state.save_to_project(prev_proj)
+    end
+
+    -- 2. Cache in-memory working state of previous project tab
+    state._projects_cache = state._projects_cache or {}
+    state._projects_cache[prev_key] = {
+      _proj_ptr = prev_proj,
+      subtitles = state.subtitles,
+      filepath = state.filepath,
+      filename = state.filename,
+      format = state.format,
+      actors = state.actors,
+      actor_counts = state.actor_counts,
+      actor_palette = state.actor_palette,
+      selected_actors = state.selected_actors,
+      undo_history = state.undo_history,
+      current_step_id = state.current_step_id,
+      next_step_id = state.next_step_id,
+      active_sub_idx = state.active_sub_idx,
+    }
+  else
+    -- Previous project tab was CLOSED (not just switched away from)!
+    state._save_project_pending_until = nil
+    state._save_project_target_proj = nil
+
+    -- Clean up cache entry for the closed project
+    if state._projects_cache then
+      state._projects_cache[prev_key] = nil
+    end
+  end
+
+  -- Prune cache of any dead project pointers
+  if state._projects_cache then
+    for k, c in pairs(state._projects_cache) do
+      if c._proj_ptr and not state.is_project_valid(c._proj_ptr) then
+        state._projects_cache[k] = nil
+      end
+    end
+  end
+
+  -- 3. Reset timeline sync states so old project items/regions don't leak
+  if not actions then
+    local ok_act, act_mod = pcall(require, 'actions')
+    if ok_act then actions = act_mod end
+  end
+  if actions and actions.timeline_sync then
+    actions.timeline_sync.is_syncing = false
+    actions.timeline_sync.drag_active = false
+    actions.timeline_sync.sub_map = nil
+    actions.timeline_sync.last_change_count = nil
+    actions.timeline_sync.last_rgn_count = nil
+    actions.timeline_sync.streaming_center = nil
+  end
+
+  -- 4. Switch active project pointers
+  state.last_proj = cur_proj
+  state.last_projfn = cur_projfn
+  state.last_proj_key = tostring(cur_proj)
+
+  -- 5. Restore target project state from memory cache or ProjExtState
+  local cur_key = tostring(cur_proj)
+  local cached = state._projects_cache[cur_key]
+  if cached then
+    state.subtitles = cached.subtitles or {}
+    state.filepath = cached.filepath
+    state.filename = cached.filename
+    state.format = cached.format
+    state.actors = cached.actors or {}
+    state.actor_counts = cached.actor_counts or {}
+    state.actor_palette = cached.actor_palette or {}
+    state.selected_actors = cached.selected_actors or {}
+    state.undo_history = cached.undo_history or {}
+    state.current_step_id = cached.current_step_id
+    state.next_step_id = cached.next_step_id
+    state.active_sub_idx = cached.active_sub_idx
+  else
+    state.load_from_project(cur_proj)
+    state.undo_history = {}
+    state.current_step_id = nil
+    state.next_step_id = nil
+    state.init_undo_tracking()
+  end
+
+  -- 6. Reset UI layout caches
+  state.row_heights = {}
+  state.undo_stack = {}
+  state.active_sub_idx = nil
+  state.user_selected_row_idx = nil
+  state.selected_real_sub_idx = nil
+  state.need_calc_scroll_target = true
+  state.refresh_actors_from_subtitles()
+  state.refresh_filter_set()
+
+  -- 7. Initialize timeline sync for newly activated project
+  if actions then
+    if actions.init_timeline_sync then
+      actions.init_timeline_sync(state)
+    end
+    if actions.sync_filter_to_timeline then
+      actions.sync_filter_to_timeline(state)
+    end
+  end
+
+  return true
 end
 
 -- Initialize global settings on module load

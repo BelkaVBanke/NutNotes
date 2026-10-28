@@ -1,15 +1,12 @@
 --[[
   REAPER timeline actions module:
   - Setting / clearing project regions
-  - Creating / clearing track "subtitle" and media items
   - Transport and edit cursor navigation
-  - Dynamic filter synchronization
+  - Dynamic filter synchronization and region duration sync
 ]]
 
 local parser = require('parser')
 local actions = {}
-
-actions.SUBTITLE_TRACK_NAME = "sub-items-track"
 
 -- Invisible UTF-8 signature: Zero-Width Space (U+200B) + Zero-Width Non-Joiner (U+200C)
 local REGION_SIGNATURE = "\xE2\x80\x8B\xE2\x80\x8C"
@@ -36,133 +33,32 @@ function actions.parse_plugin_region(name)
   return nil, payload
 end
 
--- Find existing track named "sub-items-track" (with fallback to legacy "subtitle")
-function actions.find_subtitle_track()
-  if not reaper or not reaper.CountTracks or not reaper.GetTrack or not reaper.GetSetMediaTrackInfo_String then return nil end
-
+-- Delete legacy subtitle tracks if present from earlier versions
+function actions.delete_subtitle_track()
+  if not reaper or not reaper.CountTracks or not reaper.GetTrack or not reaper.GetSetMediaTrackInfo_String or not reaper.DeleteTrack then return false end
   local num_tracks = reaper.CountTracks(0)
-  local fallback_tr = nil
-  for i = 0, num_tracks - 1 do
+  for i = num_tracks - 1, 0, -1 do
     local tr = reaper.GetTrack(0, i)
     local _, name = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
     if name then
       local lower_name = name:lower()
-      if lower_name == actions.SUBTITLE_TRACK_NAME:lower() then
-        return tr
-      elseif lower_name == "subtitle" and not fallback_tr then
-        fallback_tr = tr
+      if lower_name == "sub-items-track" or lower_name == "subtitle" then
+        reaper.DeleteTrack(tr)
       end
     end
   end
-  return fallback_tr
+  if reaper.UpdateArrange then reaper.UpdateArrange() end
+  return true
 end
 
--- Find or create track named "sub-items-track"
-function actions.get_or_create_subtitle_track()
-  local existing = actions.find_subtitle_track()
-  if existing then return existing end
-
-  if not reaper or not reaper.CountTracks or not reaper.InsertTrackAtIndex or not reaper.GetTrack or not reaper.GetSetMediaTrackInfo_String then return nil end
-  local num_tracks = reaper.CountTracks(0)
-  reaper.InsertTrackAtIndex(num_tracks, true)
-  local new_tr = reaper.GetTrack(0, num_tracks)
-  reaper.GetSetMediaTrackInfo_String(new_tr, "P_NAME", actions.SUBTITLE_TRACK_NAME, true)
-  return new_tr
-end
-
--- Clear all items on "subtitle" track
+-- Legacy backward compatibility stubs (no-op)
 function actions.clear_subtitle_track()
-  if not reaper then return 0 end
-
-  local tr = actions.find_subtitle_track()
-  if not tr then return 0 end
-
-  if reaper.PreventUIRefresh then reaper.PreventUIRefresh(1) end
-
-  local item_count = reaper.CountTrackMediaItems(tr)
-  local count_removed = 0
-  for j = item_count - 1, 0, -1 do
-    local item = reaper.GetTrackMediaItem(tr, j)
-    if item then
-      reaper.DeleteTrackMediaItem(tr, item)
-      count_removed = count_removed + 1
-    end
-  end
-
-  if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
-  if reaper.UpdateArrange then reaper.UpdateArrange() end
-
-  return count_removed
+  return actions.delete_subtitle_track()
 end
 
--- Create media items on "subtitle" track
-function actions.create_items(subtitles, palette, state)
-  if not reaper or not subtitles or #subtitles == 0 then return 0 end
-
-  if reaper.PreventUIRefresh then reaper.PreventUIRefresh(1) end
-
-  local track = actions.get_or_create_subtitle_track()
-  if not track then
-    if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
-    return 0
-  end
-
-  -- Clear existing items on the subtitle track before creating
-  local existing_count = reaper.CountTrackMediaItems(track)
-  for j = existing_count - 1, 0, -1 do
-    local old_item = reaper.GetTrackMediaItem(track, j)
-    if old_item then
-      reaper.DeleteTrackMediaItem(track, old_item)
-    end
-  end
-
-  palette = palette or {}
-  local count_created = 0
-
-  for i, sub in ipairs(subtitles) do
-    local item = reaper.AddMediaItemToTrack(track)
-    if item then
-      reaper.SetMediaItemPosition(item, sub.start_time, false)
-      local len = math.max(0.05, sub.end_time - sub.start_time)
-      reaper.SetMediaItemLength(item, len, false)
-
-      local real_idx = (state and state.find_subtitle_index and state.find_subtitle_index(sub)) or i
-      reaper.GetSetMediaItemInfo_String(item, "P_EXT:NUTNOTES_SUB_IDX", tostring(real_idx), true)
-
-      -- Take name: Raw actor + character or actor
-      local take = reaper.AddTakeToMediaItem(item)
-      if take then
-        local take_name = sub.raw_actor or sub.actor or ""
-        if take_name == "NoActor" then take_name = "" end
-        reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", take_name, true)
-      end
-
-      -- Subtitle text in Item Notes
-      reaper.GetSetMediaItemInfo_String(item, "P_NOTES", parser.strip_invisible_unicode(sub.text), true)
-
-      -- Item color: gentle pastel from primary actor's palette or default region color
-      local primary_actor = (sub.actors and sub.actors[1]) or sub.actor
-      if primary_actor ~= "NoActor" and palette[primary_actor] then
-        local col = palette[primary_actor].reaper_color or 0
-        reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", col)
-      else
-        local def_col = (palette["NoActor"] and palette["NoActor"].reaper_color) or (state and state.get_default_region_reaper_color and state.get_default_region_reaper_color()) or 0
-        reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", def_col)
-      end
-
-      count_created = count_created + 1
-    end
-  end
-
-  if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
-  if reaper.UpdateArrange then reaper.UpdateArrange() end
-
-  if state and actions.init_timeline_sync then
-    actions.init_timeline_sync(state)
-  end
-
-  return count_created
-end
+function actions.has_track_items() return false end
+function actions.find_subtitle_track() return nil end
+function actions.create_items() return 0 end
 
 -- Clear only plugin-created project regions (leaves user markers/regions intact)
 function actions.clear_regions()
@@ -174,7 +70,11 @@ function actions.clear_regions()
   for i = (num_markers + num_regions) - 1, 0, -1 do
     local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, i)
     if retval > 0 and isrgn and actions.is_plugin_region(name) then
-      reaper.DeleteProjectMarker(0, markrgnidx, true)
+      if reaper.DeleteProjectMarkerByIndex then
+        reaper.DeleteProjectMarkerByIndex(0, i)
+      else
+        reaper.DeleteProjectMarker(0, markrgnidx, true)
+      end
       count_deleted = count_deleted + 1
     end
   end
@@ -195,14 +95,7 @@ function actions.has_plugin_regions()
   return false
 end
 
--- Check if there are any items on subtitle track
-function actions.has_track_items()
-  local tr = actions.find_subtitle_track()
-  if tr and reaper and reaper.CountTrackMediaItems then
-    return reaper.CountTrackMediaItems(tr) > 0
-  end
-  return false
-end
+
 
 -- Clear all plugin regions
 function actions.clear_regions_with_undo()
@@ -210,6 +103,7 @@ function actions.clear_regions_with_undo()
 
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(1) end
   local count = actions.clear_regions()
+  actions.delete_subtitle_track()
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
   if reaper.UpdateTimeline then reaper.UpdateTimeline() end
   return count
@@ -223,11 +117,33 @@ function actions.set_regions(subtitles, palette, state)
 
   -- Delete only NutNotes plugin regions (user markers and regions stay untouched)
   actions.clear_regions()
+  -- Clean up legacy subtitle track if leftover
+  actions.delete_subtitle_track()
 
   palette = palette or {}
   local count_created = 0
 
+  local is_streaming = state and state.timeline_streaming_enabled and (#subtitles >= (state.timeline_streaming_min_subs or 3000))
+  local stream_min_t = -1
+  local stream_max_t = -1
+  if is_streaming and reaper.GetCursorPosition then
+    local cur_t = 0
+    if (reaper.GetPlayState() & 1) ~= 0 and reaper.GetPlayPosition then
+      cur_t = reaper.GetPlayPosition()
+    else
+      cur_t = reaper.GetCursorPosition()
+    end
+    local radius_sec = (state.timeline_streaming_radius_min or 5.0) * 60.0
+    stream_min_t = math.max(0, cur_t - radius_sec)
+    stream_max_t = cur_t + radius_sec
+    if actions.timeline_sync then
+      actions.timeline_sync.streaming_center = cur_t
+    end
+  end
+
   for i, sub in ipairs(subtitles) do
+    -- If dynamic streaming is active, skip regions outside the time radius
+    if not is_streaming or (sub.end_time >= stream_min_t and sub.start_time <= stream_max_t) then
     local display_name = ""
     local color = 0
 
@@ -255,6 +171,7 @@ function actions.set_regions(subtitles, palette, state)
     local tagged_name = actions.tag_region_name(display_name, real_idx)
     reaper.AddProjectMarker2(0, true, sub.start_time, sub.end_time, tagged_name, real_idx, color)
     count_created = count_created + 1
+    end -- close is_streaming window check
   end
 
   if reaper.PreventUIRefresh then reaper.PreventUIRefresh(-1) end
@@ -294,43 +211,67 @@ function actions.sync_palette_to_timeline(state)
     if reaper.UpdateTimeline then reaper.UpdateTimeline() end
   end
 
-  local tr = actions.find_subtitle_track()
-  if tr and reaper.CountTrackMediaItems and reaper.GetTrackMediaItem and reaper.GetSetMediaItemInfo_String then
-    local num_items = reaper.CountTrackMediaItems(tr)
-    for i = 0, num_items - 1 do
-      local item = reaper.GetTrackMediaItem(tr, i)
-      if item then
-        local _, idx_str = reaper.GetSetMediaItemInfo_String(item, "P_EXT:NUTNOTES_SUB_IDX", "", false)
-        local idx = tonumber(idx_str)
-        if idx and state.subtitles and state.subtitles[idx] then
-          local sub = state.subtitles[idx]
-          local primary_actor = (sub.actors and sub.actors[1]) or sub.actor
-          local itm_color = 0
-          if primary_actor ~= "NoActor" and state.actor_palette and state.actor_palette[primary_actor] then
-            itm_color = state.actor_palette[primary_actor].reaper_color or 0
-          else
-            itm_color = (state.actor_palette and state.actor_palette["NoActor"] and state.actor_palette["NoActor"].reaper_color) or (state.get_default_region_reaper_color and state.get_default_region_reaper_color()) or 0
-          end
-          reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", itm_color)
-        end
-      end
-    end
-    if reaper.UpdateArrange then reaper.UpdateArrange() end
-  end
+
 end
 
--- Synchronize both regions and items to the current filter
+-- Synchronize regions to the current filter
 function actions.sync_filter_to_timeline(state)
-  if not state.sync_with_filter then return end
-  local filtered = state.get_filtered_subtitles()
-
-  -- 1. Sync project regions
+  if not state then return end
+  if state.regions_enabled == false then
+    actions.clear_regions()
+    return
+  end
+  if not state.sync_with_filter then
+    actions.set_regions(state.subtitles or {}, state.actor_palette, state)
+    return
+  end
+  local filtered = (state.get_filtered_subtitles and state.get_filtered_subtitles()) or (state.subtitles or {})
   actions.set_regions(filtered, state.actor_palette, state)
+end
 
-  -- 2. Sync track items if track "subtitle" exists
-  local tr = actions.find_subtitle_track()
-  if tr then
-    actions.create_items(filtered, state.actor_palette, state)
+-- Ensure timeline regions match state.subtitles upon undo/redo or sync flag change
+function actions.ensure_regions_synced(state)
+  if not reaper or not state then return end
+  if state.regions_enabled == false then
+    actions.clear_regions()
+    return
+  end
+
+  local subs = (state.sync_with_filter and state.get_filtered_subtitles) and state.get_filtered_subtitles() or (state.subtitles or {})
+  if #subs == 0 then
+    actions.clear_regions()
+    return
+  end
+
+  local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
+  local rgn_count = 0
+  local existing_plugin_regions = {}
+
+  for m = 0, num_markers + num_regions - 1 do
+    local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, m)
+    if retval > 0 and isrgn and actions.is_plugin_region(name) then
+      rgn_count = rgn_count + 1
+      local idx = actions.parse_plugin_region(name)
+      if idx then
+        existing_plugin_regions[idx] = markrgnidx
+      end
+    end
+  end
+
+  if rgn_count ~= #subs then
+    actions.set_regions(subs, state.actor_palette, state)
+    return
+  end
+
+  for i, _ in ipairs(subs) do
+    if not existing_plugin_regions[i] then
+      actions.set_regions(subs, state.actor_palette, state)
+      return
+    end
+  end
+
+  if actions.init_timeline_sync then
+    actions.init_timeline_sync(state)
   end
 end
 
@@ -789,18 +730,6 @@ function actions.is_text_editing_active(ctx, state, ImGui)
     if check_popup("Переименовать / объединить актера###RENAME_ACTOR_MODAL") then return true end
   end
 
-  if ImGui.IsAnyItemActive then
-    local ok_act, is_active = pcall(ImGui.IsAnyItemActive, ctx)
-    if ok_act and is_active then
-      local ok_mouse, is_down = true, false
-      if ImGui.IsAnyMouseDown then
-        ok_mouse, is_down = pcall(ImGui.IsAnyMouseDown, ctx)
-      end
-      if not ok_mouse or not is_down then
-        return true
-      end
-    end
-  end
   return false
 end
 
@@ -830,6 +759,8 @@ actions.timeline_sync = {
   is_syncing = false,
   drag_active = false,
   last_change_time = 0,
+  last_poll_time = 0,
+  last_change_count = -1,
   undo_snapshot = nil,
   changed_sub_idx = nil,
   sub_map = {},
@@ -837,7 +768,7 @@ actions.timeline_sync = {
   last_rgn_count = -1,
 }
 
--- Initialize timeline sync mapping
+-- Initialize timeline sync mapping (Regions only)
 function actions.init_timeline_sync(state)
   if not reaper or not state or not state.subtitles or #state.subtitles == 0 then
     actions.timeline_sync.sub_map = {}
@@ -846,46 +777,6 @@ function actions.init_timeline_sync(state)
 
   local sync = actions.timeline_sync
   sync.sub_map = {}
-
-  local tr = actions.find_subtitle_track()
-  local track_items = {}
-  local num_items = 0
-  if tr then
-    num_items = reaper.CountTrackMediaItems(tr)
-    for j = 0, num_items - 1 do
-      local item = reaper.GetTrackMediaItem(tr, j)
-      local _, stored_idx_str = reaper.GetSetMediaItemInfo_String(item, "P_EXT:NUTNOTES_SUB_IDX", "", false)
-      local stored_idx = tonumber(stored_idx_str)
-      if stored_idx and stored_idx >= 1 and stored_idx <= #state.subtitles then
-        track_items[stored_idx] = item
-      end
-    end
-    -- Fallback 1: match by P_NOTES
-    for j = 0, num_items - 1 do
-      local item = reaper.GetTrackMediaItem(tr, j)
-      local _, notes = reaper.GetSetMediaItemInfo_String(item, "P_NOTES", "", false)
-      if notes and #notes > 0 then
-        for s_idx, sub in ipairs(state.subtitles) do
-          if not track_items[s_idx] and parser.strip_invisible_unicode(sub.text) == notes then
-            track_items[s_idx] = item
-            reaper.GetSetMediaItemInfo_String(item, "P_EXT:NUTNOTES_SUB_IDX", tostring(s_idx), true)
-            break
-          end
-        end
-      end
-    end
-    -- Fallback 2: 1-to-1 sequential mapping
-    if num_items == #state.subtitles then
-      for j = 0, num_items - 1 do
-        local sub_idx = j + 1
-        if not track_items[sub_idx] then
-          local item = reaper.GetTrackMediaItem(tr, j)
-          track_items[sub_idx] = item
-          reaper.GetSetMediaItemInfo_String(item, "P_EXT:NUTNOTES_SUB_IDX", tostring(sub_idx), true)
-        end
-      end
-    end
-  end
 
   -- Map regions (only NutNotes plugin regions)
   local regions_map = {}
@@ -902,79 +793,168 @@ function actions.init_timeline_sync(state)
   end
 
   for i, sub in ipairs(state.subtitles) do
-    local item = track_items[i]
     local rgn_info = regions_map[i]
-    local item_pos = item and reaper.GetMediaItemInfo_Value(item, "D_POSITION") or sub.start_time
-    local item_len = item and reaper.GetMediaItemInfo_Value(item, "D_LENGTH") or math.max(0.05, sub.end_time - sub.start_time)
     local rgn_pos = rgn_info and rgn_info.pos or sub.start_time
     local rgn_end = rgn_info and rgn_info.rgnend or sub.end_time
 
     sync.sub_map[i] = {
-      item = item,
       markrgnidx = rgn_info and rgn_info.markrgnidx or nil,
-      item_pos = item_pos,
-      item_len = item_len,
       rgn_pos = rgn_pos,
       rgn_end = rgn_end
     }
   end
 
-  sync.last_item_count = num_items
   sync.last_rgn_count = num_regions
 end
 
--- Check and synchronize timeline durations (Item <-> Region <-> Subtitles)
+-- Delete a single subtitle's region incrementally without full recreation
+function actions.delete_single_timeline_item(state, real_idx)
+  if not reaper or not real_idx then return end
+  local sync = actions.timeline_sync
+  if sync and sync.sub_map and sync.sub_map[real_idx] then
+    local entry = sync.sub_map[real_idx]
+    if entry.markrgnidx and reaper.DeleteProjectMarker then
+      reaper.DeleteProjectMarker(0, entry.markrgnidx, true)
+    end
+    table.remove(sync.sub_map, real_idx)
+    if sync.last_rgn_count and sync.last_rgn_count > 0 then
+      sync.last_rgn_count = sync.last_rgn_count - 1
+    end
+  end
+  if reaper.UpdateTimeline then reaper.UpdateTimeline() end
+end
+
+-- Add a single subtitle's region incrementally
+function actions.add_single_timeline_item(state, real_idx)
+  if not reaper or not state or not real_idx then return end
+  local sub = state.subtitles and state.subtitles[real_idx]
+  if not sub then return end
+
+  local sync = actions.timeline_sync
+
+  local is_streaming = state and state.timeline_streaming_enabled and (#state.subtitles >= (state.timeline_streaming_min_subs or 3000))
+  local in_streaming_window = true
+  if is_streaming and sync and sync.streaming_center then
+    local radius_sec = (state.timeline_streaming_radius_min or 5.0) * 60.0
+    local min_t = math.max(0, sync.streaming_center - radius_sec)
+    local max_t = sync.streaming_center + radius_sec
+    if sub.end_time < min_t or sub.start_time > max_t then
+      in_streaming_window = false
+    end
+  end
+
+  local has_rgns = (state and state.regions_enabled ~= false)
+
+  local markrgnidx = nil
+  if has_rgns and in_streaming_window and reaper.AddProjectMarker2 then
+    local display_num = #state.subtitles
+    local single_line_text = parser.strip_invisible_unicode((sub.text or ""):gsub("[\r\n]+", " "))
+    local primary_actor = (sub.actors and sub.actors[1]) or sub.actor
+    local display_name = ""
+    local rgn_color = 0
+
+    if primary_actor and primary_actor ~= "NoActor" then
+      local actor_label = sub.raw_actor or sub.actor
+      display_name = "[" .. actor_label .. "] " .. single_line_text
+      if state.actor_palette and state.actor_palette[primary_actor] then
+        rgn_color = state.actor_palette[primary_actor].reaper_color or 0
+      end
+    else
+      display_name = single_line_text
+      if state.actor_palette and state.actor_palette["NoActor"] and state.actor_palette["NoActor"].reaper_color then
+        rgn_color = state.actor_palette["NoActor"].reaper_color
+      elseif state.get_default_region_reaper_color then
+        rgn_color = state.get_default_region_reaper_color()
+      end
+    end
+
+    local tagged_name = actions.tag_region_name(display_name, display_num)
+    markrgnidx = reaper.AddProjectMarker2(0, true, sub.start_time, sub.end_time, tagged_name, display_num, rgn_color)
+  end
+
+  if sync and sync.sub_map then
+    local entry = {
+      markrgnidx = markrgnidx,
+      rgn_pos = sub.start_time,
+      rgn_end = sub.end_time
+    }
+    table.insert(sync.sub_map, real_idx, entry)
+    if sync.last_rgn_count and markrgnidx then sync.last_rgn_count = sync.last_rgn_count + 1 end
+  end
+
+  if reaper.UpdateTimeline then reaper.UpdateTimeline() end
+end
+
+-- Check and synchronize timeline durations (Region <-> Subtitles)
 function actions.check_timeline_sync(state)
   if not reaper or not state or not state.subtitles or #state.subtitles == 0 then return end
   local sync = actions.timeline_sync
   if sync.is_syncing then return end
 
-  local tr = actions.find_subtitle_track()
-  local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
-  local num_items = tr and reaper.CountTrackMediaItems(tr) or 0
+  local now_time = reaper.time_precise and reaper.time_precise() or os.clock()
+  if sync.suppress_until and now_time < sync.suppress_until then
+    return
+  end
+  local proj_changes = reaper.GetProjectStateChangeCount and reaper.GetProjectStateChangeCount(0) or -1
 
-  if num_items == 0 and num_regions == 0 then
+  -- Throttle checks when idle to eliminate frame drops on large files (>1000 subtitles)
+  if not sync.drag_active then
+    if sync.last_change_count == proj_changes and (now_time - (sync.last_poll_time or 0)) < 0.25 then
+      return
+    end
+    sync.last_poll_time = now_time
+    sync.last_change_count = proj_changes
+  end
+
+  local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
+  if num_regions == 0 then
     return
   end
 
   -- Auto-rescan if counts changed or mapping uninitialized
   if not sync.sub_map or #sync.sub_map ~= #state.subtitles
-     or num_items ~= sync.last_item_count
      or num_regions ~= sync.last_rgn_count then
     actions.init_timeline_sync(state)
   end
 
-  -- Cache regions for O(1) lookup
-  local current_regions = {}
-  if num_regions > 0 then
-    for m = 0, num_markers + num_regions - 1 do
-      local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, m)
-      if retval > 0 and isrgn then
-        current_regions[markrgnidx] = { pos = pos, rgnend = rgnend, name = name, color = color }
+  -- Dynamic streaming window auto-shift during playback or scrub
+  if state.timeline_streaming_enabled and (#state.subtitles >= (state.timeline_streaming_min_subs or 3000)) and sync.streaming_center then
+    local cur_t = 0
+    if (reaper.GetPlayState() & 1) ~= 0 and reaper.GetPlayPosition then
+      cur_t = reaper.GetPlayPosition()
+    elseif reaper.GetCursorPosition then
+      cur_t = reaper.GetCursorPosition()
+    end
+    local radius_sec = (state.timeline_streaming_radius_min or 5.0) * 60.0
+    if math.abs(cur_t - sync.streaming_center) > (radius_sec * 0.4) then
+      local filtered = state.get_filtered_subtitles()
+      local has_rgns = (sync.last_rgn_count and sync.last_rgn_count > 0) or (actions.has_plugin_regions and actions.has_plugin_regions())
+      if has_rgns then
+        actions.set_regions(filtered, state.actor_palette, state)
       end
     end
   end
 
-  local any_changed = false
-  local now_time = reaper.time_precise and reaper.time_precise() or os.clock()
+  -- Cache regions for O(1) lookup
+  local current_regions = {}
+  for m = 0, num_markers + num_regions - 1 do
+    local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, m)
+    if retval > 0 and isrgn then
+      current_regions[markrgnidx] = { pos = pos, rgnend = rgnend, name = name, color = color }
+    end
+  end
 
+  local any_changed = false
   for i, sub in ipairs(state.subtitles) do
     local entry = sync.sub_map[i]
     if entry then
-      local cur_item_pos, cur_item_len = nil, nil
-      if entry.item and reaper.ValidatePtr2(0, entry.item, "MediaItem*") then
-        cur_item_pos = reaper.GetMediaItemInfo_Value(entry.item, "D_POSITION")
-        cur_item_len = reaper.GetMediaItemInfo_Value(entry.item, "D_LENGTH")
-      end
-
       local cur_rgn_info = entry.markrgnidx and current_regions[entry.markrgnidx]
       local cur_rgn_pos = cur_rgn_info and cur_rgn_info.pos
       local cur_rgn_end = cur_rgn_info and cur_rgn_info.rgnend
 
-      local item_diff = cur_item_pos and (math.abs(cur_item_pos - entry.item_pos) > 0.005 or math.abs(cur_item_len - entry.item_len) > 0.005)
       local rgn_diff = cur_rgn_pos and (math.abs(cur_rgn_pos - entry.rgn_pos) > 0.005 or math.abs(cur_rgn_end - entry.rgn_end) > 0.005)
 
-      if item_diff or rgn_diff then
+      if rgn_diff then
         sync.is_syncing = true
 
         if not sync.drag_active then
@@ -985,51 +965,18 @@ function actions.check_timeline_sync(state)
         sync.changed_sub_idx = i
         any_changed = true
 
-        if item_diff and not rgn_diff then
-          -- User modified item -> update region & subtitle
-          local new_start = cur_item_pos
-          local new_end = cur_item_pos + cur_item_len
-          sub.start_time = new_start
-          sub.end_time = new_end
+        sub.start_time = cur_rgn_pos
+        sub.end_time = cur_rgn_end
+        entry.rgn_pos = cur_rgn_pos
+        entry.rgn_end = cur_rgn_end
 
-          if entry.markrgnidx and cur_rgn_info then
-            reaper.SetProjectMarker3(0, entry.markrgnidx, true, new_start, new_end, cur_rgn_info.name, cur_rgn_info.color)
-            if reaper.UpdateTimeline then reaper.UpdateTimeline() end
-          end
-
-          entry.item_pos = cur_item_pos
-          entry.item_len = cur_item_len
-          entry.rgn_pos = new_start
-          entry.rgn_end = new_end
-
-        elseif rgn_diff and not item_diff then
-          -- User modified region -> update item & subtitle
-          local new_start = cur_rgn_pos
-          local new_end = cur_rgn_end
-          sub.start_time = new_start
-          sub.end_time = new_end
-
-          if entry.item and reaper.ValidatePtr2(0, entry.item, "MediaItem*") then
-            reaper.SetMediaItemPosition(entry.item, new_start, false)
-            reaper.SetMediaItemLength(entry.item, math.max(0.05, new_end - new_start), false)
-            if reaper.UpdateArrange then reaper.UpdateArrange() end
-          end
-
-          entry.rgn_pos = cur_rgn_pos
-          entry.rgn_end = cur_rgn_end
-          entry.item_pos = new_start
-          entry.item_len = math.max(0.05, new_end - new_start)
-
-        elseif item_diff and rgn_diff then
-          -- Both changed together (e.g. REAPER Undo)
-          sub.start_time = cur_item_pos
-          sub.end_time = cur_item_pos + cur_item_len
-          entry.item_pos = cur_item_pos
-          entry.item_len = cur_item_len
-          if cur_rgn_pos then
-            entry.rgn_pos = cur_rgn_pos
-            entry.rgn_end = cur_rgn_end
-          end
+        -- Immediately recalculate CPS and update subtitle properties
+        local dur = math.max(0.001, sub.end_time - sub.start_time)
+        local char_cnt = sub.char_cnt or (parser and parser.utf8_len and parser.utf8_len(sub.text)) or (sub.text and #sub.text) or 0
+        sub.char_cnt = char_cnt
+        sub.cps = char_cnt / dur
+        if state.prepare_sub_props then
+          state.prepare_sub_props(sub)
         end
 
         state.row_heights = {}
@@ -1049,16 +996,27 @@ function actions.check_timeline_sync(state)
     if not mouse_down and (now_time - sync.last_change_time > 0.18) then
       sync.drag_active = false
       local ch_idx = sync.changed_sub_idx or 1
+
+      local needs_reorder = false
+      for k = 1, #state.subtitles - 1 do
+        if state.subtitles[k].start_time > state.subtitles[k + 1].start_time then
+          needs_reorder = true
+          break
+        end
+      end
+      if needs_reorder and parser and parser.sort_subtitles then
+        parser.sort_subtitles(state.subtitles)
+        actions.init_timeline_sync(state)
+      end
       if sync.undo_snapshot and state.push_undo then
         local old_snap = {
           subtitles = sync.undo_snapshot,
           actor_palette = state.deep_copy_table and state.deep_copy_table(state.actor_palette),
           selected_actors = state.deep_copy_table and state.deep_copy_table(state.selected_actors),
           regions_displayed = actions.has_plugin_regions(),
-          items_displayed = actions.has_track_items(),
           name = "Синхронизация длительности субтитра #" .. ch_idx
         }
-        state.push_undo("Синхронизация длительности субтитра #" .. ch_idx, old_snap)
+        state.push_undo("Синхронизация длительности субтитра #" .. ch_idx, old_snap, function() end)
       end
       sync.undo_snapshot = nil
       state.save_to_project()
@@ -1066,40 +1024,12 @@ function actions.check_timeline_sync(state)
   end
 end
 
--- Update subtitle appearance on timeline (take name, notes, region name, colors)
+-- Update subtitle appearance on timeline (region name, colors)
 function actions.update_subtitle_timeline(state, idx)
   if not reaper or not state or not state.subtitles or not state.subtitles[idx] then return end
   local sub = state.subtitles[idx]
 
-  -- 1. Update MediaItem on track "subtitle"
-  local tr = actions.find_subtitle_track()
-  if tr then
-    local num_items = reaper.CountTrackMediaItems(tr)
-    for j = 0, num_items - 1 do
-      local item = reaper.GetTrackMediaItem(tr, j)
-      local _, stored_idx = reaper.GetSetMediaItemInfo_String(item, "P_EXT:NUTNOTES_SUB_IDX", "", false)
-      if stored_idx == tostring(idx) or (stored_idx == "" and j == (idx - 1)) then
-        local take = reaper.GetActiveTake(item)
-        if take then
-          local take_name = sub.raw_actor or sub.actor or ""
-          if take_name == "NoActor" then take_name = "" end
-          reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", take_name, true)
-        end
-        local primary_actor = (sub.actors and sub.actors[1]) or sub.actor
-        if primary_actor ~= "NoActor" and state.actor_palette and state.actor_palette[primary_actor] then
-          reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", state.actor_palette[primary_actor].reaper_color or 0)
-        else
-          local def_c = (state.actor_palette and state.actor_palette["NoActor"] and state.actor_palette["NoActor"].reaper_color) or (state.get_default_region_reaper_color and state.get_default_region_reaper_color()) or 0
-          reaper.SetMediaItemInfo_Value(item, "I_CUSTOMCOLOR", def_c)
-        end
-        reaper.GetSetMediaItemInfo_String(item, "P_NOTES", parser.strip_invisible_unicode(sub.text), true)
-        break
-      end
-    end
-    if reaper.UpdateArrange then reaper.UpdateArrange() end
-  end
-
-  -- 2. Update project region (only NutNotes plugin region)
+  -- Update project region (only NutNotes plugin region)
   local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
   for m = 0, num_markers + num_regions - 1 do
     local retval, isrgn, pos, rgnend, name, markrgnidx, color = reaper.EnumProjectMarkers3(0, m)
@@ -1136,24 +1066,7 @@ function actions.update_all_timeline_actors(state)
     actions.update_subtitle_timeline(state, i)
   end
 
-  -- Clean up any extra media items on subtitle track whose index exceeds #state.subtitles
-  local tr = actions.find_subtitle_track()
-  if tr and reaper.CountTrackMediaItems and reaper.DeleteTrackMediaItem then
-    local num_items = reaper.CountTrackMediaItems(tr)
-    for j = num_items - 1, 0, -1 do
-      local item = reaper.GetTrackMediaItem(tr, j)
-      if item then
-        local _, stored_idx_str = reaper.GetSetMediaItemInfo_String(item, "P_EXT:NUTNOTES_SUB_IDX", "", false)
-        local s_idx = tonumber(stored_idx_str)
-        if s_idx and s_idx > #state.subtitles then
-          reaper.DeleteTrackMediaItem(tr, item)
-        elseif not s_idx and j >= #state.subtitles then
-          reaper.DeleteTrackMediaItem(tr, item)
-        end
-      end
-    end
-    if reaper.UpdateArrange then reaper.UpdateArrange() end
-  end
+
 
   -- Clean up any extra plugin project regions whose index exceeds #state.subtitles
   if reaper.CountProjectMarkers and reaper.EnumProjectMarkers3 and reaper.DeleteProjectMarker then
@@ -1236,21 +1149,9 @@ function actions.create_subtitle_from_time_selection(state)
     state.time_selection_error_msg = nil
     state.time_selection_error_until = 0
 
-    -- Timeline sync already committed inside undo block; initialize duration tracking
-    actions.init_timeline_sync(state)
-
+    -- Selection and auto-scroll (timeline entry already added incrementally)
     -- Select newly created subtitle and scroll to it without opening popup modal
     state._is_creating_new_sub = nil
-    state.selected_real_sub_idx = new_idx
-    local filtered = state.get_filtered_subtitles()
-    for fi, fs in ipairs(filtered) do
-      if fs == new_sub then
-        state.active_sub_idx = fi
-        break
-      end
-    end
-    state.last_centered_idx = -1
-    state.need_calc_scroll_target = true
     return true
 
   end

@@ -53,7 +53,27 @@ function watermark.init(ctx, ImGui)
   get_watermark_image(ctx, ImGui)
 end
 
-function watermark.draw(ctx, ImGui, center_x, center_y, max_dim, show_circle, state, custom_draw_list)
+function watermark.draw_focus(ctx, ImGui, center_x, center_y, size, custom_draw_list, alpha)
+  if not ctx or not ImGui then return end
+  local draw_list = custom_draw_list or (ImGui.GetWindowDrawList and ImGui.GetWindowDrawList(ctx))
+  if not draw_list then return end
+
+  local img = get_watermark_image(ctx, ImGui)
+  if not img or not ImGui.DrawList_AddImage then return end
+
+  local eff_alpha = alpha or 0.045
+  local draw_col = ImGui.ColorConvertDouble4ToU32(1.0, 1.0, 1.0, eff_alpha)
+  local img_sz = size or 250.0
+  local h_size = img_sz * 0.5
+
+  pcall(ImGui.DrawList_AddImage, draw_list, img,
+    center_x - h_size, center_y - h_size,
+    center_x + h_size, center_y + h_size,
+    0.0, 0.0, 1.0, 1.0, draw_col
+  )
+end
+
+function watermark.draw(ctx, ImGui, center_x, center_y, max_dim, show_circle, state, custom_draw_list, custom_col, custom_size)
   if not ctx or not ImGui then return end
   local draw_list = custom_draw_list or (ImGui.GetWindowDrawList and ImGui.GetWindowDrawList(ctx))
   if not draw_list then return end
@@ -113,14 +133,15 @@ function watermark.draw(ctx, ImGui, center_x, center_y, max_dim, show_circle, st
       )
     end
   else
-    -- Without circle (Overlay placeholder)
-    local img_size = math.max(28.0, math.min(100.0, (max_dim or 100.0) * 0.75))
+    -- Without circle (Focus mode or Overlay placeholder: outline only)
+    local img_size = custom_size or math.max(28.0, (max_dim or 100.0) * 0.75)
+    local draw_col = custom_col or col_acorn
     if img and ImGui.DrawList_AddImage then
       local h_size = img_size * 0.5
       pcall(ImGui.DrawList_AddImage, draw_list, img,
         center_x - h_size, center_y - h_size,
         center_x + h_size, center_y + h_size,
-        0.0, 0.0, 1.0, 1.0, col_acorn
+        0.0, 0.0, 1.0, 1.0, draw_col
       )
     end
   end

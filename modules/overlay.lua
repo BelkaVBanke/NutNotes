@@ -21,11 +21,13 @@ local watermark = require('watermark')
 local overlay = {}
 local overlay_font_cache = {}
 local overlay_pending_fonts = {}
+local timer_font_cache = {}
 local is_overlay_frame_active = false
+local last_timer_font_family = nil
 
 function overlay.attach_font_now(ctx, ImGui, size)
   if not ImGui or not ImGui.CreateFont or not ImGui.Attach or not ctx then return nil end
-  size = math.max(9, math.min(96, math.floor(size)))
+  size = math.max(9, math.min(160, math.floor(size)))
   if overlay_font_cache[size] ~= nil then
     return overlay_font_cache[size]
   end
@@ -45,32 +47,45 @@ function overlay.attach_font_now(ctx, ImGui, size)
   return nil
 end
 
-function overlay.init_fonts(ctx, state, ImGui)
-  if not ImGui or not ImGui.CreateFont or not ImGui.Attach or not ctx then return end
-  local common_sizes = { 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 36, 40, 44, 48, 56, 64, 72, 80, 88, 96 }
-  if state and state.overlay_font_size then
-    table.insert(common_sizes, math.floor(state.overlay_font_size))
+local function get_timer_font(ctx, ImGui, family, size)
+  family = family or "sans-serif"
+  size = math.max(10, math.min(160, math.floor(size)))
+  local key = family .. "_" .. tostring(size)
+  if timer_font_cache[key] ~= nil then
+    return timer_font_cache[key]
   end
-  for _, sz in ipairs(common_sizes) do
-    overlay.attach_font_now(ctx, ImGui, sz)
+  local ok, f = pcall(ImGui.CreateFont, family, size, 0)
+  if not (ok and f) then
+    ok, f = pcall(ImGui.CreateFont, "sans-serif", size, 0)
   end
-end
-
-function overlay.check_fonts(ctx, state, ImGui)
-  if not ImGui or not ImGui.CreateFont or not ImGui.Attach or not ctx then return end
-  for sz, _ in pairs(overlay_pending_fonts) do
-    if overlay_font_cache[sz] == nil or overlay_font_cache[sz] == false then
-      overlay.attach_font_now(ctx, ImGui, sz)
+  if ok and f then
+    local a_ok = pcall(ImGui.Attach, ctx, f)
+    if a_ok then
+      timer_font_cache[key] = f
+      return f
     end
   end
-  overlay_pending_fonts = {}
+  timer_font_cache[key] = false
+  return nil
 end
 
 local function find_closest_overlay_font(size)
-  size = math.max(9, math.min(96, math.floor(size)))
+  size = math.max(9, math.min(160, math.floor(size)))
   if overlay_font_cache[size] then return overlay_font_cache[size] end
   local best_f = nil
   local best_diff = 999
+  -- First try font smaller than or equal to requested size
+  for sz, f in pairs(overlay_font_cache) do
+    if f and type(f) ~= "boolean" then
+      local diff = size - sz
+      if diff >= 0 and diff < best_diff then
+        best_diff = diff
+        best_f = f
+      end
+    end
+  end
+  if best_f then return best_f end
+
   for sz, f in pairs(overlay_font_cache) do
     if f and type(f) ~= "boolean" then
       local diff = math.abs(sz - size)
@@ -83,9 +98,82 @@ local function find_closest_overlay_font(size)
   return best_f
 end
 
+local function find_closest_timer_font(family, size)
+  family = family or "Segoe UI"
+  size = math.max(10, math.min(160, math.floor(size)))
+  local key = family .. "_" .. tostring(size)
+  if timer_font_cache[key] then return timer_font_cache[key] end
+
+  local best_f = nil
+  local best_diff = 999
+  for k, f in pairs(timer_font_cache) do
+    if f and type(f) ~= "boolean" then
+      local fam, sz_str = k:match("^(.-)_(%d+)$")
+      if fam == family and sz_str then
+        local sz = tonumber(sz_str)
+        local diff = size - sz
+        if diff >= 0 and diff < best_diff then
+          best_diff = diff
+          best_f = f
+        end
+      end
+    end
+  end
+  if best_f then return best_f end
+
+  for k, f in pairs(timer_font_cache) do
+    if f and type(f) ~= "boolean" then
+      local fam, _ = k:match("^(.-)_(%d+)$")
+      if fam == family then return f end
+    end
+  end
+
+  return find_closest_overlay_font(size)
+end
+
+function overlay.init_fonts(ctx, state, ImGui)
+  if not ImGui or not ImGui.CreateFont or not ImGui.Attach or not ctx then return end
+  local common_sizes = { 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 36, 40, 44, 48, 52, 56, 60, 64, 72, 80, 88, 96, 112, 128, 144, 160 }
+  if state and state.overlay_font_size then
+    table.insert(common_sizes, math.floor(state.overlay_font_size))
+  end
+  for _, sz in ipairs(common_sizes) do
+    overlay.attach_font_now(ctx, ImGui, sz)
+  end
+
+  local timer_fam = (state and state.timer_overlay_font_family) or "Segoe UI"
+  last_timer_font_family = timer_fam
+  local timer_sizes = { 14, 18, 22, 26, 30, 36, 42, 48, 54, 60, 68, 76, 84, 96, 110, 128, 144, 160 }
+  for _, sz in ipairs(timer_sizes) do
+    get_timer_font(ctx, ImGui, timer_fam, sz)
+    if timer_fam ~= "sans-serif" then
+      get_timer_font(ctx, ImGui, "sans-serif", sz)
+    end
+  end
+end
+
+function overlay.check_fonts(ctx, state, ImGui)
+  if not ImGui or not ImGui.CreateFont or not ImGui.Attach or not ctx then return end
+  for sz, _ in pairs(overlay_pending_fonts) do
+    if overlay_font_cache[sz] == nil or overlay_font_cache[sz] == false then
+      overlay.attach_font_now(ctx, ImGui, sz)
+    end
+  end
+  overlay_pending_fonts = {}
+
+  local cur_tfam = state and state.timer_overlay_font_family
+  if cur_tfam and cur_tfam ~= last_timer_font_family then
+    last_timer_font_family = cur_tfam
+    local timer_sizes = { 14, 18, 22, 26, 30, 36, 42, 48, 54, 60, 68, 76, 84, 96, 110, 128, 144, 160 }
+    for _, sz in ipairs(timer_sizes) do
+      get_timer_font(ctx, ImGui, cur_tfam, sz)
+    end
+  end
+end
+
 local function get_overlay_font(ctx, ImGui, size)
   if not ImGui or not ImGui.CreateFont or not ImGui.Attach then return nil end
-  size = math.max(9, math.min(96, math.floor(size)))
+  size = math.max(9, math.min(160, math.floor(size)))
   if overlay_font_cache[size] then
     return overlay_font_cache[size]
   end
@@ -165,6 +253,254 @@ local function find_fitting_font_and_lines(ctx, ImGui, text, base_sz, max_w, max
   return chosen_sz, chosen_lines, chosen_line_h
 end
 
+-- Live runtime tracking for real-time CPS delay and cascading shift (computed on the fly)
+local live_trk = {
+  was_playing = false,
+  active_idx = nil,
+  active_v_start = 0.0,
+  active_v_end = 0.0,
+  current_drift = 0.0,
+  last_play_pos = 0.0,
+}
+
+local function bsearch_subs(subs, cur_time)
+  local low, high = 1, #subs
+  local ans = nil
+  while low <= high do
+    local mid = (low + high) // 2
+    if subs[mid].start_time <= cur_time then
+      ans = mid
+      low = mid + 1
+    else
+      high = mid - 1
+    end
+  end
+  return ans
+end
+
+local function get_sub_char_cnt(sub)
+  if not sub then return 0 end
+  if sub.char_cnt then return sub.char_cnt end
+  if parser and parser.utf8_len and sub.text then
+    return parser.utf8_len(sub.text)
+  end
+  return sub.text and #sub.text or 0
+end
+
+function overlay.eval_active_sub(subs, cur_time, is_playing, hold_mode, target_cps, max_hold, max_drift, trk, lead_in, fixed_lead_in)
+  if not subs or #subs == 0 then
+    return nil, nil, nil, false, 0.0
+  end
+
+  trk = trk or live_trk
+  hold_mode = hold_mode or 2
+  target_cps = math.max(5.0, target_cps or 17.0)
+  max_hold = math.max(0.1, max_hold or 1.5)
+  max_drift = math.max(0.2, max_drift or 2.5)
+  lead_in = lead_in or 0.0
+  local is_fixed = (fixed_lead_in == true)
+
+  -- When NOT playing (stopped / editing cursor positioning):
+  -- Past drift has ZERO influence! Subtitle under cursor starts fresh.
+  if not is_playing or hold_mode <= 1 then
+    trk.was_playing = false
+    trk.current_drift = 0.0
+    trk.active_idx = nil
+
+    local best = bsearch_subs(subs, cur_time)
+    local playing_idx = nil
+    local upcoming_idx = nil
+    local prev_idx = nil
+
+    if best then
+      local sub = subs[best]
+      if cur_time <= sub.end_time then
+        playing_idx = best
+        if best > 1 then prev_idx = best - 1 end
+        if is_fixed and lead_in > 0 and best < #subs then
+          local next_s = subs[best + 1]
+          if cur_time >= (next_s.start_time - lead_in) then
+            upcoming_idx = best + 1
+          end
+        end
+      else
+        prev_idx = best
+        if best < #subs then
+          local next_s = subs[best + 1]
+          if (not is_fixed) or lead_in <= 0 or cur_time >= (next_s.start_time - lead_in) then
+            upcoming_idx = best + 1
+          end
+        end
+      end
+    else
+      if #subs > 0 then
+        local first_s = subs[1]
+        if (not is_fixed) or lead_in <= 0 or cur_time >= (first_s.start_time - lead_in) then
+          upcoming_idx = 1
+        end
+      end
+    end
+
+    return playing_idx, upcoming_idx, prev_idx, false, 0.0
+  end
+
+  -- When PLAYING:
+  -- Detect if playback just started or if user seeked (>0.5s jump in play position or backward jump)
+  local seeked = false
+  if trk.was_playing then
+    if math.abs(cur_time - trk.last_play_pos) > 0.5 or (cur_time < trk.last_play_pos - 0.05) then
+      seeked = true
+    end
+  else
+    seeked = true
+  end
+  trk.last_play_pos = cur_time
+
+  if seeked then
+    trk.was_playing = true
+    trk.current_drift = 0.0
+    trk.active_idx = nil
+
+    local best = bsearch_subs(subs, cur_time)
+    if best then
+      local sub = subs[best]
+      -- Activate strictly if playback starts INSIDE physical subtitle boundaries!
+      -- If started in a gap after sub.end_time, past subtitle must never be revived into overtime!
+      if cur_time >= sub.start_time and cur_time <= sub.end_time then
+        local char_cnt = get_sub_char_cnt(sub)
+        local dur = math.max(0.1, sub.end_time - sub.start_time)
+        local extra = math.min(max_hold, math.max(0.0, (char_cnt / target_cps) - dur))
+        if hold_mode == 2 then
+          local next_s = subs[best + 1] and subs[best + 1].start_time or (sub.end_time + 10.0)
+          extra = math.min(extra, math.max(0.0, next_s - sub.end_time))
+        end
+        local v_end = sub.end_time + extra
+        trk.active_idx = best
+        trk.active_v_start = sub.start_time
+        trk.active_v_end = v_end
+      end
+    end
+  end
+
+  -- If currently tracking an active subtitle:
+  if trk.active_idx and subs[trk.active_idx] then
+    local sub = subs[trk.active_idx]
+    if cur_time <= trk.active_v_end then
+      local is_overtime = (cur_time > sub.end_time)
+      local drift_val = is_overtime and (cur_time - sub.end_time) or trk.current_drift
+      local up_i = nil
+      if is_fixed and lead_in > 0 and trk.active_idx < #subs then
+        local next_s = subs[trk.active_idx + 1]
+        local next_start = (hold_mode == 3) and math.max(next_s.start_time, trk.active_v_end) or next_s.start_time
+        if cur_time >= (next_start - lead_in) then
+          up_i = trk.active_idx + 1
+        end
+      end
+      return trk.active_idx, up_i, nil, is_overtime, drift_val
+    else
+      -- Active sub has finished its hold!
+      local next_i = trk.active_idx + 1
+      if next_i <= #subs then
+        local next_s = subs[next_i]
+        if hold_mode == 3 and cur_time >= next_s.start_time then
+          -- Cascade into next sub with accumulated drift
+          local drift = math.min(max_drift, math.max(0.0, trk.active_v_end - next_s.start_time))
+          trk.active_idx = next_i
+          trk.active_v_start = next_s.start_time + drift
+          local char_cnt = get_sub_char_cnt(next_s)
+          local dur = math.max(0.1, next_s.end_time - next_s.start_time)
+          local extra = math.min(max_hold, math.max(0.0, (char_cnt / target_cps) - dur))
+          trk.active_v_end = trk.active_v_start + dur + extra
+          trk.current_drift = drift
+          local is_overtime = (cur_time > (next_s.end_time + drift))
+          local cur_drift = is_overtime and (cur_time - (next_s.end_time + drift)) or drift
+          local up_i = nil
+          if is_fixed and lead_in > 0 and next_i < #subs then
+            local after_s = subs[next_i + 1]
+            local after_start = math.max(after_s.start_time, trk.active_v_end)
+            if cur_time >= (after_start - lead_in) then
+              up_i = next_i + 1
+            end
+          end
+          return next_i, up_i, nil, is_overtime, cur_drift
+        elseif cur_time >= next_s.start_time then
+          -- Mode 2 (gaps only) or gap absorbed drift
+          trk.active_idx = next_i
+          trk.active_v_start = next_s.start_time
+          trk.current_drift = 0.0
+          local char_cnt = get_sub_char_cnt(next_s)
+          local dur = math.max(0.1, next_s.end_time - next_s.start_time)
+          local extra = math.min(max_hold, math.max(0.0, (char_cnt / target_cps) - dur))
+          if hold_mode == 2 then
+            local after_s = subs[next_i + 1] and subs[next_i + 1].start_time or (next_s.end_time + 10.0)
+            extra = math.min(extra, math.max(0.0, after_s - next_s.end_time))
+          end
+          trk.active_v_end = next_s.end_time + extra
+          local is_overtime = (cur_time > next_s.end_time)
+          local cur_drift = is_overtime and (cur_time - next_s.end_time) or 0.0
+          local up_i = nil
+          if is_fixed and lead_in > 0 and next_i < #subs then
+            local after_s = subs[next_i + 1]
+            if cur_time >= (after_s.start_time - lead_in) then
+              up_i = next_i + 1
+            end
+          end
+          return next_i, up_i, nil, is_overtime, cur_drift
+        end
+      end
+      trk.active_idx = nil
+      trk.current_drift = 0.0
+    end
+  end
+
+  -- If not in an active sub, look up if currently in a sub or in a gap:
+  local best = bsearch_subs(subs, cur_time)
+  if best then
+    local sub = subs[best]
+    if cur_time <= sub.end_time then
+      trk.active_idx = best
+      trk.active_v_start = sub.start_time
+      trk.current_drift = 0.0
+      local char_cnt = get_sub_char_cnt(sub)
+      local dur = math.max(0.1, sub.end_time - sub.start_time)
+      local extra = math.min(max_hold, math.max(0.0, (char_cnt / target_cps) - dur))
+      if hold_mode == 2 then
+        local next_s = subs[best + 1] and subs[best + 1].start_time or (sub.end_time + 10.0)
+        extra = math.min(extra, math.max(0.0, next_s - sub.end_time))
+      end
+      trk.active_v_end = sub.end_time + extra
+      local up_i = nil
+      if is_fixed and lead_in > 0 and best < #subs then
+        local next_s = subs[best + 1]
+        local next_start = (hold_mode == 3) and math.max(next_s.start_time, trk.active_v_end) or next_s.start_time
+        if cur_time >= (next_start - lead_in) then
+          up_i = best + 1
+        end
+      end
+      return best, up_i, nil, false, 0.0
+    else
+      local prev_idx = best
+      local upcoming_idx = nil
+      if best < #subs then
+        local next_s = subs[best + 1]
+        if (not is_fixed) or lead_in <= 0 or cur_time >= (next_s.start_time - lead_in) then
+          upcoming_idx = best + 1
+        end
+      end
+      return nil, upcoming_idx, prev_idx, false, 0.0
+    end
+  else
+    local upcoming_idx = nil
+    if #subs > 0 then
+      local first_s = subs[1]
+      if (not is_fixed) or lead_in <= 0 or cur_time >= (first_s.start_time - lead_in) then
+        upcoming_idx = 1
+      end
+    end
+    return nil, upcoming_idx, nil, false, 0.0
+  end
+end
+
 function overlay.draw(ctx, state, ImGui)
   if not state.overlay_enabled then return end
 
@@ -217,7 +553,7 @@ function overlay.draw(ctx, state, ImGui)
   end
 
   is_overlay_frame_active = true
-  local visible, open = ImGui.Begin(ctx, "NutNotes (Оверлей)###NUTNOTES_OVERLAY_WINDOW", true, flags)
+  local visible, open = ImGui.Begin(ctx, "NutNotes (Хардсаб)###NUTNOTES_OVERLAY_WINDOW", true, flags)
   if not open then
     state.overlay_enabled = false
     state.save_settings()
@@ -246,25 +582,21 @@ function overlay.draw(ctx, state, ImGui)
     local show_actor_badge = state.overlay_show_actor and (not is_single_actor_mode)
 
     if subs_to_use and #subs_to_use > 0 then
-      -- 1. Find currently playing sub or upcoming sub and previous sub
-      local playing_idx = nil
-      local upcoming_idx = nil
-      local prev_idx = nil
-
-      for i, sub in ipairs(subs_to_use) do
-        if cur_time >= sub.start_time and cur_time <= sub.end_time then
-          playing_idx = i
-          break
-        elseif sub.start_time > cur_time then
-          upcoming_idx = i
-          if i > 1 then
-            prev_idx = i - 1
-          end
-          break
-        else
-          prev_idx = i
-        end
-      end
+      local is_reaper_playing = reaper and ((reaper.GetPlayState() & 1) ~= 0)
+      local fixed_lead_in = (state.text_fixed_lead_in == true)
+      local lead_in = fixed_lead_in and (state.text_lead_in_time or 0.35) or 0.0
+      local playing_idx, upcoming_idx, prev_idx, is_overtime, current_drift = overlay.eval_active_sub(
+        subs_to_use,
+        cur_time,
+        is_reaper_playing,
+        state.overlay_hold_mode or 2,
+        state.overlay_target_cps or 17.0,
+        state.overlay_max_hold or 0.7,
+        state.overlay_max_drift or 2.5,
+        nil,
+        lead_in,
+        fixed_lead_in
+      )
 
       local main_sub = nil
       local preview_sub = nil
@@ -272,20 +604,16 @@ function overlay.draw(ctx, state, ImGui)
       local progress = 0.0
 
       if playing_idx then
-        -- Speech in progress: Line is playing
         main_sub = subs_to_use[playing_idx]
         is_gap = false
         local dur = math.max(0.001, main_sub.end_time - main_sub.start_time)
         progress = math.min(1.0, math.max(0.0, (cur_time - main_sub.start_time) / dur))
-
         if state.overlay_show_next_preview then
           preview_sub = subs_to_use[playing_idx + 1]
         end
       elseif upcoming_idx then
-        -- Gap / pause before upcoming line: Upcoming line is main text (dimmed), bar is shrinking countdown
         main_sub = subs_to_use[upcoming_idx]
         is_gap = true
-
         local prev_sub = prev_idx and subs_to_use[prev_idx]
         local prev_end = prev_sub and prev_sub.end_time or (main_sub.start_time - 5.0)
         local total_gap = math.max(0.2, main_sub.start_time - prev_end)
@@ -335,6 +663,39 @@ function overlay.draw(ctx, state, ImGui)
         local main_alpha = is_gap and (ta * 0.65) or ta
         local main_text_u32 = ImGui.ColorConvertDouble4ToU32(cur_tr, cur_tg, cur_tb, main_alpha)
         local main_shadow_u32 = ImGui.ColorConvertDouble4ToU32(0, 0, 0, main_alpha * 0.9)
+
+        -- OVERTIME / DRIFT BADGE (+X.Xs in top-right corner)
+        if state.overlay_show_drift_badge and (is_overtime or current_drift > 0.05) then
+          local drift_val = current_drift > 0.05 and current_drift or (cur_time - main_sub.end_time)
+          if drift_val > 0.05 then
+            local drift_text = string.format("+%.1fs", drift_val)
+            local badge_sz = math.max(10, math.floor((state.overlay_actor_font_size or 18.0) * 0.85))
+            local badge_font = get_overlay_font(ctx, ImGui, badge_sz)
+            local b_f_pushed = false
+            if badge_font and ImGui.PushFont then
+              ImGui.PushFont(ctx, badge_font)
+              b_f_pushed = true
+            end
+
+            local bw, bh = ImGui.CalcTextSize(ctx, drift_text)
+            local badge_x = win_w - bw - 18.0
+            local badge_y = 6.0
+            local dl = ImGui.GetWindowDrawList(ctx)
+            local wx, wy = ImGui.GetWindowPos(ctx)
+            local bx1 = wx + badge_x - 5.0
+            local by1 = wy + badge_y - 2.0
+            local bx2 = bx1 + bw + 10.0
+            local by2 = by1 + bh + 4.0
+
+            ImGui.DrawList_AddRectFilled(dl, bx1, by1, bx2, by2, 0x1A1E24EE, 4.0)
+            ImGui.DrawList_AddRect(dl, bx1, by1, bx2, by2, 0xF59E0BAA, 4.0, 0, 1.0)
+            ImGui.DrawList_AddText(dl, wx + badge_x, wy + badge_y, 0xF59E0BFF, drift_text)
+
+            if b_f_pushed then
+              ImGui.PopFont(ctx)
+            end
+          end
+        end
 
         -- 1. MAIN ACTOR BADGE (Used when position is "top")
         local is_actor_top = (state.overlay_actor_position ~= "left")
@@ -654,6 +1015,9 @@ function overlay.draw(ctx, state, ImGui)
             if is_gap then
               -- Shrinking countdown in gap: NEUTRAL GREY color
               bar_col = ImGui.ColorConvertDouble4ToU32(0.52, 0.52, 0.52, 0.70)
+            elseif is_overtime then
+              -- Overtime / hold phase: warm amber glow
+              bar_col = ImGui.ColorConvertDouble4ToU32(0.96, 0.62, 0.12, 1.0)
             else
               -- Active speech filling bar: Actor color or text color (fully opaque)
               local pal = state.actor_palette[main_sub.actor]
@@ -1019,6 +1383,202 @@ function overlay.draw(ctx, state, ImGui)
   is_overlay_frame_active = false
 
   -- On mouse release (click or drag on overlay finished), return keyboard focus to REAPER
+  if (ImGui.IsMouseReleased(ctx, 0) or ImGui.IsMouseReleased(ctx, 1) or ImGui.IsMouseReleased(ctx, 2)) then
+    if not actions.is_text_editing_active(ctx, state, ImGui) and not actions.is_popup_open(ctx, ImGui) then
+      actions.return_focus_to_reaper()
+    end
+  end
+
+  ImGui.PopStyleVar(ctx, 3)
+  ImGui.PopStyleColor(ctx, 1)
+end
+
+function overlay.draw_timer(ctx, state, ImGui)
+  if not state.timer_overlay_enabled then return end
+
+  local flags = ImGui.WindowFlags_NoTitleBar
+              | ImGui.WindowFlags_NoScrollbar
+              | ImGui.WindowFlags_NoCollapse
+              | ImGui.WindowFlags_NoDocking
+
+  if ImGui.WindowFlags_NoNavInputs then flags = flags | ImGui.WindowFlags_NoNavInputs end
+  if ImGui.WindowFlags_NoNavFocus then flags = flags | ImGui.WindowFlags_NoNavFocus end
+  if ImGui.WindowFlags_NoFocusOnAppearing then flags = flags | ImGui.WindowFlags_NoFocusOnAppearing end
+
+  if state.overlay_always_on_top and ImGui.WindowFlags_TopMost then
+    flags = flags | ImGui.WindowFlags_TopMost
+  end
+
+  local bg_alpha = state.timer_overlay_bg_alpha or 0.75
+  local bg_r = (state.timer_overlay_bg_color and state.timer_overlay_bg_color[1]) or 0.0
+  local bg_g = (state.timer_overlay_bg_color and state.timer_overlay_bg_color[2]) or 0.0
+  local bg_b = (state.timer_overlay_bg_color and state.timer_overlay_bg_color[3]) or 0.0
+  local bg_u32 = ImGui.ColorConvertDouble4ToU32(bg_r, bg_g, bg_b, bg_alpha)
+
+  ImGui.PushStyleColor(ctx, ImGui.Col_WindowBg, bg_u32)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_WindowRounding, 8.0)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_WindowPadding, 8.0, 4.0)
+  ImGui.PushStyleVar(ctx, ImGui.StyleVar_WindowBorderSize, 1.0)
+
+  ImGui.SetNextWindowSize(ctx, 240, 75, ImGui.Cond_FirstUseEver)
+  local visible, open = ImGui.Begin(ctx, "NutNotes Timer Overlay##FloatingTimer", true, flags)
+  if not open then
+    state.timer_overlay_enabled = false
+    state.save_settings()
+  end
+
+  if visible then
+    local cur_time = 0
+    local play_state = (reaper and reaper.GetPlayState and reaper.GetPlayState()) or 0
+    local is_playing = (play_state & 1) ~= 0
+    local is_paused = (play_state & 2) ~= 0
+    local is_recording = (play_state & 4) ~= 0
+
+    if is_playing and reaper.GetPlayPosition then
+      cur_time = reaper.GetPlayPosition()
+    elseif reaper.GetCursorPosition then
+      cur_time = reaper.GetCursorPosition()
+    end
+    if cur_time < 0 then cur_time = 0 end
+
+    local fmt = state.timer_overlay_format or 1
+    local time_str = ""
+    local total_sec = math.floor(cur_time)
+    local frac_hundredth = math.floor((cur_time - total_sec) * 100)
+    if frac_hundredth > 99 then frac_hundredth = 99 end
+    if frac_hundredth < 0 then frac_hundredth = 0 end
+    local frac_tenth = math.floor(frac_hundredth / 10)
+
+    local h = math.floor(total_sec / 3600)
+    local m = math.floor((total_sec % 3600) / 60)
+    local s = total_sec % 60
+
+    if fmt == 1 then
+      -- MM:SS.dd
+      time_str = string.format("%02d:%02d.%02d", m, s, frac_hundredth)
+    elseif fmt == 2 then
+      -- HH:MM:SS.dd
+      time_str = string.format("%02d:%02d:%02d.%02d", h, m, s, frac_hundredth)
+    elseif fmt == 3 then
+      -- SS.dd
+      time_str = string.format("%.2f", cur_time)
+    elseif fmt == 4 then
+      -- MM:SS.d
+      time_str = string.format("%02d:%02d.%d", m, s, frac_tenth)
+    elseif fmt == 5 then
+      -- HH:MM:SS.d
+      time_str = string.format("%02d:%02d:%02d.%d", h, m, s, frac_tenth)
+    elseif fmt == 6 then
+      -- SS.d
+      time_str = string.format("%.1f", cur_time)
+    elseif fmt == 7 then
+      -- MM:SS
+      time_str = string.format("%02d:%02d", m, s)
+    elseif fmt == 8 then
+      -- HH:MM:SS
+      time_str = string.format("%02d:%02d:%02d", h, m, s)
+    else
+      time_str = string.format("%02d:%02d.%02d", m, s, frac_hundredth)
+    end
+
+    local status_badge = "STOP"
+    local badge_color = 0x8892B0FF
+
+    if is_recording then
+      status_badge = "REC"
+      badge_color = 0xFF4444FF
+    elseif is_playing then
+      status_badge = "PLAY"
+      badge_color = 0x44EE77FF
+    elseif is_paused then
+      status_badge = "PAUSE"
+      badge_color = 0xFFAA33FF
+    else
+      status_badge = "STOP"
+      badge_color = 0x8892B0FF
+    end
+
+    local color_mode = state.timer_overlay_color_mode or 1
+    local text_color = 0xFFFFFFFF
+    if color_mode == 2 or color_mode == 3 then
+      -- Mode 2: "Включено" (динамическая цветовая реакция на статус REAPER)
+      text_color = badge_color
+    else
+      -- Mode 1: "Нет" (постоянный цвет, выбранный пользователем, по умолчанию белый)
+      local col = state.timer_custom_color or { 1.0, 1.0, 1.0, 1.0 }
+      text_color = ImGui.ColorConvertDouble4ToU32(col[1] or 1.0, col[2] or 1.0, col[3] or 1.0, col[4] or 1.0)
+    end
+
+    local avail_w, avail_h = ImGui.GetContentRegionAvail(ctx)
+    local font_family = state.timer_overlay_font_family or "Segoe UI"
+
+    -- Calculate ideal font size based on window width and height to smoothly scale
+    local char_len = math.max(4, #time_str)
+    local max_sz_w = (avail_w * 0.88) / (char_len * 0.58)
+    local max_sz_h = avail_h * 0.72
+    local ideal_sz = math.max(10, math.min(160, math.floor(math.min(max_sz_w, max_sz_h))))
+
+    local font = find_closest_timer_font(font_family, ideal_sz)
+    if not font then
+      font = find_closest_overlay_font(ideal_sz)
+    end
+
+    if font then ImGui.PushFont(ctx, font) end
+
+    local text_w, text_h = ImGui.CalcTextSize(ctx, time_str)
+    local off_x = math.max(0.0, (avail_w - text_w) * 0.5)
+    local off_y = math.max(0.0, (avail_h - text_h) * 0.5)
+
+    ImGui.SetCursorPosX(ctx, ImGui.GetCursorPosX(ctx) + off_x)
+    ImGui.SetCursorPosY(ctx, ImGui.GetCursorPosY(ctx) + off_y)
+
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, text_color)
+    ImGui.Text(ctx, time_str)
+    ImGui.PopStyleColor(ctx, 1)
+
+    if font then ImGui.PopFont(ctx) end
+
+    local draw_list = ImGui.GetWindowDrawList(ctx)
+    local win_min_x, win_min_y = ImGui.GetWindowPos(ctx)
+    local win_w, win_h = ImGui.GetWindowSize(ctx)
+    if win_w >= 100 and win_h >= 45 then
+      local b_font = get_overlay_font(ctx, ImGui, 10)
+      if b_font then ImGui.PushFont(ctx, b_font) end
+      local bw, bh = ImGui.CalcTextSize(ctx, status_badge)
+      local bx = win_min_x + win_w - bw - 8.0
+      local by = win_min_y + win_h - bh - 4.0
+      ImGui.DrawList_AddText(draw_list, bx, by, badge_color, status_badge)
+      if b_font then ImGui.PopFont(ctx) end
+    end
+
+    -- Drop target for timer overlay window
+    if ImGui.BeginDragDropTarget and ImGui.BeginDragDropTarget(ctx) then
+      local rv, count = ImGui.AcceptDragDropPayloadFiles and ImGui.AcceptDragDropPayloadFiles(ctx)
+      if rv and count and count > 0 then
+        for i = 0, count - 1 do
+          local ok, filepath = false, nil
+          if ImGui.GetDragDropPayloadFile then
+            ok, filepath = ImGui.GetDragDropPayloadFile(ctx, i)
+          end
+          if ok and filepath and type(filepath) == "string" and #filepath > 0 then
+            filepath = filepath:gsub("\\", "/")
+            local ext = filepath:match("%.([^%.]+)$")
+            if ext then ext = ext:lower() end
+            if ext == "ass" or ext == "srt" or ext == "sub" or ext == "vtt" or ext == "txt" then
+              state.load_file(filepath)
+              actions.sync_filter_to_timeline(state)
+              break
+            end
+          end
+        end
+      end
+      ImGui.EndDragDropTarget(ctx)
+    end
+
+    pcall(ImGui.End, ctx)
+  end
+
+  -- On mouse release on timer overlay, return keyboard focus to REAPER
   if (ImGui.IsMouseReleased(ctx, 0) or ImGui.IsMouseReleased(ctx, 1) or ImGui.IsMouseReleased(ctx, 2)) then
     if not actions.is_text_editing_active(ctx, state, ImGui) and not actions.is_popup_open(ctx, ImGui) then
       actions.return_focus_to_reaper()

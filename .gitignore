@@ -5,31 +5,47 @@
 # Сборки и релизные артефакты
 build/
 dist/
-
+installer/Output/
 examples/
 *.zip
 *.tar.gz
 *.exe
 *.dll
 
+# Python кэш и окружение
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
 *.coverage
+.env
+.venv/
+env/
+venv/
 
+# Временные скрипты разработки и анализа
+scratch/
+find_keys*.py
+read_doc*.py
 audit_*.py
 check_*.py
 analyze_*.py
 search_doc.py
 test_*.py
 names_analysis.txt
+
+# Временные файлы установщика и логи
 installer/temp.txt
+installer/*.tmp
+installer/*.log
+*.tmp
+*.temp
+*.log
+*.bak
+temp/
 
-# Локальные тяжелые файлы документации и временные логи
+# Локальные тяжелые файлы документации и превью
 reaper_imgui_doc.html
-names_analysis.txt
-
 github_preview_v1_logo.png
 github_preview_v2_logo_text.png
 

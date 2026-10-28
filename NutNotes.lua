@@ -1,6 +1,6 @@
 --[[
   @description NutNotes - REAPER Subtitle & Dubbing Assistant (ASS & SRT)
-  @version 0.4.1-beta
+  @version 0.5.0-beta
   @author NutNotes Community
   @provides [main] NutNotes.lua
   @requires ReaImGui
@@ -157,6 +157,7 @@ local ctx = ImGui.CreateContext('NutNotes', config_flags)
 
 -- Load saved project subtitles & settings on launch
 state.load_from_project()
+state.init_undo_tracking()
 actions.init_timeline_sync(state)
 actions.return_focus_to_reaper()
 
@@ -168,6 +169,14 @@ if watermark.init then watermark.init(ctx, ImGui) end
 
 -- Main loop
 local function loop()
+  -- 0. Check if active project tab changed FIRST before any undo/save/timeline sync
+  if state.check_project_changed then
+    state.check_project_changed(actions)
+  end
+
+  -- Check and flush any pending debounced project state save
+  if state.check_pending_save then state.check_pending_save() end
+
   -- Pre-attach any pending fonts before beginning any window or frame
   if ui.check_fonts then ui.check_fonts(ctx, state, ImGui) end
   if overlay.check_fonts then overlay.check_fonts(ctx, state, ImGui) end
@@ -175,8 +184,9 @@ local function loop()
   -- Automatic sync with REAPER native Undo/Redo stack
   state.check_reaper_undo_sync(actions)
 
-  -- Two-way timeline duration & position sync (Item <-> Region <-> Subtitles)
+  -- Two-way timeline duration & position sync (Region <-> Subtitles)
   actions.check_timeline_sync(state)
+
 
   -- 1. Check external action trigger (e.g. from NutNotes_CreateSubtitle.lua or REAPER Action List)
   if reaper and reaper.GetExtState then
@@ -214,19 +224,12 @@ local function loop()
         local ctrl_down  = (vkeys:byte(0x11) ~= 0) -- 0x11 = VK_CONTROL (17)
         local alt_down   = (vkeys:byte(0x12) ~= 0) -- 0x12 = VK_MENU (18)
 
-        if reaper.JS_Mouse_GetState then
-          local mc = reaper.JS_Mouse_GetState(0x1C) -- 8=Shift, 4=Ctrl, 16=Alt
-          if (mc & 8) ~= 0 then shift_down = true end
-          if (mc & 4) ~= 0 then ctrl_down = true end
-          if (mc & 16) ~= 0 then alt_down = true end
-        end
-
         local target_hk = state.hotkey_create_sub or "Shift+T"
         local match = false
         if target_hk == "Shift+T" then
-          match = shift_down and not ctrl_down and not alt_down and t_down
+          match = shift_down and not ctrl_down and t_down
         elseif target_hk == "T" then
-          match = not shift_down and not ctrl_down and not alt_down and t_down
+          match = not shift_down and not ctrl_down and t_down
         end
 
         local is_typing = actions.is_text_editing_active(ctx, state, ImGui)
@@ -234,6 +237,31 @@ local function loop()
           actions.create_subtitle_from_time_selection(state)
         end
         state._prev_hk_create_sub_pressed = match
+
+        -- Delete / Backspace when a row in NutNotes list was clicked and selected (disabled in focus mode):
+        -- Regular Delete: leaves playback timing position intact
+        -- Ctrl+Delete: deletes and jumps playback timing position to next subtitle
+        local del_down = (vkeys:byte(0x2E) ~= 0) or (vkeys:byte(0x08) ~= 0)
+        local is_playing = reaper and ((reaper.GetPlayState() & 1) ~= 0)
+        if del_down and not state._prev_del_down and not is_typing and not is_playing and not state.focus_mode then
+          local to_del = state.user_selected_row_idx
+          if to_del and state.subtitles and state.subtitles[to_del] then
+            state.delete_subtitle(to_del, ctrl_down)
+          end
+        end
+        state._prev_del_down = del_down
+
+        -- Clear user_selected_row_idx when user clicks in REAPER arrange view:
+        if reaper.JS_Window_GetFocus and reaper.JS_Mouse_GetState and (reaper.JS_Mouse_GetState(1) ~= 0) then
+          local now_p = (reaper.time_precise and reaper.time_precise()) or os.clock()
+          if state.last_click_row_time and (now_p - state.last_click_row_time) > 0.6 then
+            local w_focus = reaper.JS_Window_GetFocus()
+            local title = (w_focus and reaper.JS_Window_GetTitle and reaper.JS_Window_GetTitle(w_focus)) or ""
+            if title == "trackview" or title == "" then
+              state.user_selected_row_idx = nil
+            end
+          end
+        end
       end
     end
   end
@@ -242,8 +270,13 @@ local function loop()
   local running = ui.draw(ctx, state, ImGui)
 
   -- Draw floating hardsub overlay window if enabled
-  if state.overlay_enabled then
+  if state.overlay_enabled and overlay and overlay.draw then
     overlay.draw(ctx, state, ImGui)
+  end
+
+  -- Draw floating timer overlay window if enabled (NoDocking / follows TopMost)
+  if state.timer_overlay_enabled and overlay and overlay.draw_timer then
+    overlay.draw_timer(ctx, state, ImGui)
   end
 
   if running then
@@ -252,8 +285,10 @@ local function loop()
     if reaper and reaper.SetExtState then
       reaper.SetExtState("NUTNOTES", "RUNNING", "", false)
     end
-    -- Save final state on close
-    state.save_to_project()
+    -- Save final state on close only if project has subtitles loaded
+    if state.subtitles and #state.subtitles > 0 then
+      state.save_to_project(state.last_proj)
+    end
   end
 end
 
