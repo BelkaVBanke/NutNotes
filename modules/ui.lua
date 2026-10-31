@@ -4084,23 +4084,11 @@ function ui.render_subtitles_list(ctx, state, ImGui, is_focus_mode)
 
         if state.text_show_cps then
 
-          local cps_val = sub.cps
+          local cps_val = (parser and parser.get_sub_cps and parser.get_sub_cps(sub)) or sub.cps or 0.0
 
-          local char_cnt = sub.char_cnt
+          local char_cnt = (parser and parser.get_sub_char_cnt and parser.get_sub_char_cnt(sub)) or sub.char_cnt or 0
 
-          local dur = math.max(0.1, (sub.end_time or 0) - (sub.start_time or 0))
-
-          if not cps_val then
-
-            char_cnt = char_cnt or (utf8 and utf8.len and utf8.len(single_line) or #single_line)
-
-            sub.char_cnt = char_cnt
-
-            cps_val = char_cnt / dur
-
-            sub.cps = cps_val
-
-          end
+          local dur = math.max(0.001, (sub.end_time or 0) - (sub.start_time or 0))
 
 
 
@@ -5906,7 +5894,7 @@ local function render_text_preview_card(ctx, state, ImGui, act_acc)
 
         local char_capacity = math.max(15, math.floor(avail_w / (font_sz * 0.52)))
 
-        local char_count = item.char_cnt or (parser.utf8_len and parser.utf8_len(item.text)) or #item.text
+        local char_count = (parser and parser.get_sub_char_cnt and parser.get_sub_char_cnt(item)) or item.char_cnt or 0
 
         local total_chars = char_count + 16 + (state.text_show_cps and 10 or 0)
 
@@ -5988,19 +5976,11 @@ local function render_text_preview_card(ctx, state, ImGui, act_acc)
 
         if state.text_show_cps then
 
-          local cps_val = item.cps
+          local cps_val = (parser and parser.get_sub_cps and parser.get_sub_cps(item)) or item.cps or 0.0
 
-          local char_cnt = item.char_cnt
+          local char_cnt = (parser and parser.get_sub_char_cnt and parser.get_sub_char_cnt(item)) or item.char_cnt or 0
 
-          local dur = item.dur or 2.0
-
-          if not cps_val then
-
-            char_cnt = char_cnt or (parser.utf8_len and parser.utf8_len(item.text)) or #item.text
-
-            cps_val = char_cnt / dur
-
-          end
+          local dur = item.dur or math.max(0.001, (item.end_time or 0) - (item.start_time or 0))
 
 
 
@@ -10410,19 +10390,13 @@ function ui.render_text_edit_modal(ctx, state, ImGui)
 
           sub.text = new_text
 
-          if state.prepare_sub_props then
+          if parser and parser.prepare_sub_props then
+
+            parser.prepare_sub_props(sub)
+
+          elseif state.prepare_sub_props then
 
             state.prepare_sub_props(sub)
-
-          else
-
-            sub.single_line = new_text:gsub("[\r\n]+", " ")
-
-            sub.char_cnt = (parser and parser.utf8_len and parser.utf8_len(sub.single_line)) or #sub.single_line
-
-            local dur = math.max(0.001, (sub.end_time or 0) - (sub.start_time or 0))
-
-            sub.cps = sub.char_cnt / dur
 
           end
 

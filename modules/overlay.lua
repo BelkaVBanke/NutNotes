@@ -278,14 +278,7 @@ local function bsearch_subs(subs, cur_time)
   return ans
 end
 
-local function get_sub_char_cnt(sub)
-  if not sub then return 0 end
-  if sub.char_cnt then return sub.char_cnt end
-  if parser and parser.utf8_len and sub.text then
-    return parser.utf8_len(sub.text)
-  end
-  return sub.text and #sub.text or 0
-end
+-- Subtitle character count & CPS are computed via parser.get_sub_char_cnt / parser.get_sub_cps (Single Source of Truth)
 
 function overlay.eval_active_sub(subs, cur_time, is_playing, hold_mode, target_cps, max_hold, max_drift, trk, lead_in, fixed_lead_in)
   if not subs or #subs == 0 then
@@ -367,7 +360,7 @@ function overlay.eval_active_sub(subs, cur_time, is_playing, hold_mode, target_c
       -- Activate strictly if playback starts INSIDE physical subtitle boundaries!
       -- If started in a gap after sub.end_time, past subtitle must never be revived into overtime!
       if cur_time >= sub.start_time and cur_time <= sub.end_time then
-        local char_cnt = get_sub_char_cnt(sub)
+        local char_cnt = parser.get_sub_char_cnt(sub)
         local dur = math.max(0.1, sub.end_time - sub.start_time)
         local extra = math.min(max_hold, math.max(0.0, (char_cnt / target_cps) - dur))
         if hold_mode == 2 then
@@ -407,7 +400,7 @@ function overlay.eval_active_sub(subs, cur_time, is_playing, hold_mode, target_c
           local drift = math.min(max_drift, math.max(0.0, trk.active_v_end - next_s.start_time))
           trk.active_idx = next_i
           trk.active_v_start = next_s.start_time + drift
-          local char_cnt = get_sub_char_cnt(next_s)
+          local char_cnt = parser.get_sub_char_cnt(next_s)
           local dur = math.max(0.1, next_s.end_time - next_s.start_time)
           local extra = math.min(max_hold, math.max(0.0, (char_cnt / target_cps) - dur))
           trk.active_v_end = trk.active_v_start + dur + extra
@@ -428,7 +421,7 @@ function overlay.eval_active_sub(subs, cur_time, is_playing, hold_mode, target_c
           trk.active_idx = next_i
           trk.active_v_start = next_s.start_time
           trk.current_drift = 0.0
-          local char_cnt = get_sub_char_cnt(next_s)
+          local char_cnt = parser.get_sub_char_cnt(next_s)
           local dur = math.max(0.1, next_s.end_time - next_s.start_time)
           local extra = math.min(max_hold, math.max(0.0, (char_cnt / target_cps) - dur))
           if hold_mode == 2 then
@@ -461,7 +454,7 @@ function overlay.eval_active_sub(subs, cur_time, is_playing, hold_mode, target_c
       trk.active_idx = best
       trk.active_v_start = sub.start_time
       trk.current_drift = 0.0
-      local char_cnt = get_sub_char_cnt(sub)
+      local char_cnt = parser.get_sub_char_cnt(sub)
       local dur = math.max(0.1, sub.end_time - sub.start_time)
       local extra = math.min(max_hold, math.max(0.0, (char_cnt / target_cps) - dur))
       if hold_mode == 2 then

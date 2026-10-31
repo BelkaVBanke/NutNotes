@@ -51,6 +51,50 @@ function parser.utf8_lower(str)
   return s
 end
 
+-- Safe UTF-8 character length (counting unicode code points instead of raw bytes)
+function parser.utf8_len(str)
+  if not str or #str == 0 then return 0 end
+  if utf8 and utf8.len then
+    local ok, len = pcall(utf8.len, str)
+    if ok and len then return len end
+  end
+  local count = 0
+  for _ in str:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+    count = count + 1
+  end
+  return (count > 0) and count or #str
+end
+
+-- Get subtitle character count with caching (Single Source of Truth)
+function parser.get_sub_char_cnt(sub)
+  if not sub then return 0 end
+  if sub.char_cnt then return sub.char_cnt end
+  local str = sub.single_line or (sub.text and sub.text:gsub("[\r\n]+", " ")) or ""
+  local cnt = parser.utf8_len(str)
+  sub.char_cnt = cnt
+  return cnt
+end
+
+-- Get subtitle CPS with caching (Single Source of Truth)
+function parser.get_sub_cps(sub)
+  if not sub then return 0.0 end
+  if sub.cps then return sub.cps end
+  local char_cnt = parser.get_sub_char_cnt(sub)
+  local dur = math.max(0.001, (sub.end_time or 0) - (sub.start_time or 0))
+  local cps = char_cnt / dur
+  sub.cps = cps
+  return cps
+end
+
+-- Prepare all subtitle computed properties in one call
+function parser.prepare_sub_props(sub)
+  if not sub then return end
+  sub.single_line = (sub.text or ""):gsub("[\r\n]+", " ")
+  sub.char_cnt = parser.utf8_len(sub.single_line)
+  local dur = math.max(0.001, (sub.end_time or 0) - (sub.start_time or 0))
+  sub.cps = sub.char_cnt / dur
+end
+
 -- Truncate string with UTF-8 character awareness and add ellipsis
 function parser.truncate_utf8(str, max_chars)
   if not str then return "" end
@@ -760,6 +804,11 @@ function parser.parse(content, filename_or_ext, opts)
     end
   end
   if res and res.ok and res.subtitles then
+    for _, sub in ipairs(res.subtitles) do
+      if not sub.char_cnt or not sub.cps then
+        parser.prepare_sub_props(sub)
+      end
+    end
     parser.sort_subtitles(res.subtitles)
   end
   return res

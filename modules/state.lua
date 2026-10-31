@@ -7,7 +7,7 @@ local colors = require('colors')
 local parser = require('parser')
 
 local state = {
-  version = "0.5.0-beta",
+  version = "0.5.1-beta",
   -- Project identifier tracker
   last_proj = nil,
 
@@ -1704,6 +1704,11 @@ function state.load_from_project(target_proj)
     if #state.subtitles > 1 and parser and parser.sort_subtitles then
       parser.sort_subtitles(state.subtitles)
     end
+    if state.subtitles then
+      for _, sub in ipairs(state.subtitles) do
+        state.prepare_sub_props(sub)
+      end
+    end
   else
     state.subtitles = {}
   end
@@ -1745,6 +1750,9 @@ end
 -- Helper to lazily prepare a subtitle's single_line, char_cnt, and cps properties
 function state.prepare_sub_props(s)
   if not s then return end
+  if parser and parser.prepare_sub_props then
+    return parser.prepare_sub_props(s)
+  end
   s.single_line = (s.text or ""):gsub("[\r\n]+", " ")
   s.char_cnt = (parser and parser.utf8_len and parser.utf8_len(s.single_line)) or (utf8 and utf8.len and utf8.len(s.single_line)) or #s.single_line
   local dur = math.max(0.001, (s.end_time or 0) - (s.start_time or 0))
@@ -1786,6 +1794,11 @@ function state.load_file(filepath)
   state.filename = res.filename
   state.format = res.format
   state.subtitles = res.subtitles
+  if state.subtitles then
+    for _, sub in ipairs(state.subtitles) do
+      state.prepare_sub_props(sub)
+    end
+  end
   state.actors = res.actors
   state.actor_counts = res.actor_counts
 
@@ -1835,10 +1848,25 @@ function state.check_project_changed(actions)
     return false
   end
 
-  -- If same project pointer, just check if filename updated (e.g. user saved untitled project to disk)
+  -- If same project pointer, check if project was replaced in same tab (File -> Open / Recent)
   if cur_proj == state.last_proj then
     if cur_projfn ~= state.last_projfn then
+      local was_opened_file = (state.last_projfn and #state.last_projfn > 0)
       state.last_projfn = cur_projfn
+      if was_opened_file and cur_projfn and #cur_projfn > 0 then
+        -- User opened a different project file in the same tab: reload project subtitles & reset sync
+        state.load_from_project(cur_proj)
+        state.undo_history = {}
+        state.current_step_id = nil
+        state.next_step_id = nil
+        state.init_undo_tracking()
+        if actions and actions.timeline_sync then
+          actions.timeline_sync.streaming_center = nil
+          if actions.init_timeline_sync then actions.init_timeline_sync(state) end
+          if actions.sync_filter_to_timeline then actions.sync_filter_to_timeline(state) end
+        end
+        return true
+      end
     end
     return false
   end

@@ -1,6 +1,6 @@
 --[[
   @description NutNotes - REAPER Subtitle & Dubbing Assistant (ASS & SRT)
-  @version 0.5.0-beta
+  @version 0.5.1-beta
   @author NutNotes Community
   @provides [main] NutNotes.lua
   @requires ReaImGui
@@ -144,6 +144,51 @@ if reaper.set_action_options then
   pcall(reaper.set_action_options, 1)
 end
 
+-- Singleton guard: Check if an instance of NutNotes is already running
+if reaper and reaper.GetExtState and reaper.GetExtState("NUTNOTES", "RUNNING") == "true" then
+  -- Toggle: signal the active instance to terminate, then exit immediately
+  if reaper.SetExtState then
+    reaper.SetExtState("NUTNOTES", "EXIT_SIGNAL", "true", false)
+  end
+  return
+end
+
+-- Mark as running
+if reaper and reaper.SetExtState then
+  reaper.SetExtState("NUTNOTES", "RUNNING", "true", false)
+  reaper.SetExtState("NUTNOTES", "EXIT_SIGNAL", "", false)
+end
+
+-- Sync toolbar button toggle state (ON)
+local _, _, action_section_id, action_cmd_id = reaper.get_action_context()
+if action_cmd_id and action_cmd_id > 0 and reaper.SetToggleCommandState then
+  reaper.SetToggleCommandState(action_section_id, action_cmd_id, 1)
+  if reaper.RefreshToolbar2 then
+    reaper.RefreshToolbar2(action_section_id, action_cmd_id)
+  end
+end
+
+-- Cleanup handler on exit (called on window close, user toggle, or REAPER exit)
+local function cleanup()
+  if reaper and reaper.SetExtState then
+    reaper.SetExtState("NUTNOTES", "RUNNING", "", false)
+    reaper.SetExtState("NUTNOTES", "EXIT_SIGNAL", "", false)
+  end
+  if action_cmd_id and action_cmd_id > 0 and reaper.SetToggleCommandState then
+    reaper.SetToggleCommandState(action_section_id, action_cmd_id, 0)
+    if reaper.RefreshToolbar2 then
+      reaper.RefreshToolbar2(action_section_id, action_cmd_id)
+    end
+  end
+  if state and state.subtitles and #state.subtitles > 0 then
+    state.save_to_project(state.last_proj)
+  end
+end
+
+if reaper and reaper.atexit then
+  reaper.atexit(cleanup)
+end
+
 -- Create ImGui context with docking support
 local config_flags = ImGui.ConfigFlags_DockingEnable
 if type(config_flags) == "function" then
@@ -169,6 +214,13 @@ if watermark.init then watermark.init(ctx, ImGui) end
 
 -- Main loop
 local function loop()
+  -- Check if another instance requested an exit / toggle off
+  if reaper and reaper.GetExtState and reaper.GetExtState("NUTNOTES", "EXIT_SIGNAL") == "true" then
+    reaper.SetExtState("NUTNOTES", "EXIT_SIGNAL", "", false)
+    cleanup()
+    return
+  end
+
   -- 0. Check if active project tab changed FIRST before any undo/save/timeline sync
   if state.check_project_changed then
     state.check_project_changed(actions)
@@ -282,18 +334,8 @@ local function loop()
   if running then
     reaper.defer(loop)
   else
-    if reaper and reaper.SetExtState then
-      reaper.SetExtState("NUTNOTES", "RUNNING", "", false)
-    end
-    -- Save final state on close only if project has subtitles loaded
-    if state.subtitles and #state.subtitles > 0 then
-      state.save_to_project(state.last_proj)
-    end
+    cleanup()
   end
-end
-
-if reaper and reaper.SetExtState then
-  reaper.SetExtState("NUTNOTES", "RUNNING", "true", false)
 end
 
 -- Start loop

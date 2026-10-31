@@ -311,10 +311,38 @@ function actions.set_startup_enabled(enable)
 -- >>> NutNotes Startup >>>
 reaper.defer(function()
   local res = reaper.GetResourcePath()
-  local cmd_id = reaper.NamedCommandLookup("_RS_NUTNOTES_LAUNCHER")
-  if not cmd_id or cmd_id <= 0 then
-    cmd_id = reaper.NamedCommandLookup("_RS2dc2e136e0d96f0d14a4948732a1c5629b86ef37")
+  local script_path = res .. "/Scripts/NutNotes/NutNotes.lua"
+  local cmd_id = 0
+
+  -- 1. Try dynamic resolution via AddRemoveReaScript (standard REAPER API)
+  if reaper.AddRemoveReaScript then
+    cmd_id = reaper.AddRemoveReaScript(true, 0, script_path, false) or 0
   end
+
+  -- 2. Try looking up known / standard Action IDs
+  if not cmd_id or cmd_id <= 0 then
+    cmd_id = reaper.NamedCommandLookup("_RSca963619caeafe19ff7d9d09bdc3b6a4f678aad7")
+  end
+  if not cmd_id or cmd_id <= 0 then
+    cmd_id = reaper.NamedCommandLookup("_RS_NUTNOTES_LAUNCHER")
+  end
+
+  -- 3. Scan reaper-kb.ini dynamically if not resolved
+  if (not cmd_id or cmd_id <= 0) and reaper.NamedCommandLookup then
+    local kb_file = io.open(res .. "/reaper-kb.ini", "r")
+    if kb_file then
+      for line in kb_file:lines() do
+        local hash = line:match("SCR%s+%d+%s+%d+%s+(RS%x+)%s+.-NutNotes%.lua")
+        if hash then
+          cmd_id = reaper.NamedCommandLookup("_" .. hash)
+          if cmd_id and cmd_id > 0 then break end
+        end
+      end
+      kb_file:close()
+    end
+  end
+
+  -- 4. Execute as true REAPER Action if resolved
   if cmd_id and cmd_id > 0 then
     reaper.Main_OnCommand(cmd_id, 0)
   else
@@ -906,6 +934,22 @@ function actions.check_timeline_sync(state)
     sync.last_change_count = proj_changes
   end
 
+  -- Dynamic streaming window auto-shift during playback or scrub
+  local is_streaming = state.timeline_streaming_enabled and (#state.subtitles >= (state.timeline_streaming_min_subs or 3000))
+  if is_streaming and state.regions_enabled ~= false then
+    local cur_t = 0
+    if (reaper.GetPlayState() & 1) ~= 0 and reaper.GetPlayPosition then
+      cur_t = reaper.GetPlayPosition()
+    elseif reaper.GetCursorPosition then
+      cur_t = reaper.GetCursorPosition()
+    end
+    local radius_sec = (state.timeline_streaming_radius_min or 5.0) * 60.0
+    if not sync.streaming_center or math.abs(cur_t - sync.streaming_center) > (radius_sec * 0.4) then
+      local filtered = state.get_filtered_subtitles()
+      actions.set_regions(filtered, state.actor_palette, state)
+    end
+  end
+
   local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
   if num_regions == 0 then
     return
@@ -915,24 +959,6 @@ function actions.check_timeline_sync(state)
   if not sync.sub_map or #sync.sub_map ~= #state.subtitles
      or num_regions ~= sync.last_rgn_count then
     actions.init_timeline_sync(state)
-  end
-
-  -- Dynamic streaming window auto-shift during playback or scrub
-  if state.timeline_streaming_enabled and (#state.subtitles >= (state.timeline_streaming_min_subs or 3000)) and sync.streaming_center then
-    local cur_t = 0
-    if (reaper.GetPlayState() & 1) ~= 0 and reaper.GetPlayPosition then
-      cur_t = reaper.GetPlayPosition()
-    elseif reaper.GetCursorPosition then
-      cur_t = reaper.GetCursorPosition()
-    end
-    local radius_sec = (state.timeline_streaming_radius_min or 5.0) * 60.0
-    if math.abs(cur_t - sync.streaming_center) > (radius_sec * 0.4) then
-      local filtered = state.get_filtered_subtitles()
-      local has_rgns = (sync.last_rgn_count and sync.last_rgn_count > 0) or (actions.has_plugin_regions and actions.has_plugin_regions())
-      if has_rgns then
-        actions.set_regions(filtered, state.actor_palette, state)
-      end
-    end
   end
 
   -- Cache regions for O(1) lookup
@@ -971,11 +997,9 @@ function actions.check_timeline_sync(state)
         entry.rgn_end = cur_rgn_end
 
         -- Immediately recalculate CPS and update subtitle properties
-        local dur = math.max(0.001, sub.end_time - sub.start_time)
-        local char_cnt = sub.char_cnt or (parser and parser.utf8_len and parser.utf8_len(sub.text)) or (sub.text and #sub.text) or 0
-        sub.char_cnt = char_cnt
-        sub.cps = char_cnt / dur
-        if state.prepare_sub_props then
+        if parser and parser.prepare_sub_props then
+          parser.prepare_sub_props(sub)
+        elseif state.prepare_sub_props then
           state.prepare_sub_props(sub)
         end
 
